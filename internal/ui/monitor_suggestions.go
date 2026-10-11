@@ -46,7 +46,7 @@ func (m *Model) syncMonitorSuggestions() tea.Cmd {
 	}
 	c, ok := m.fetcher.(codex.SessionCommandsClient)
 	if !ok {
-		*s = monitorSuggestionState{active: true, session: m.monitorPrompt.session, request: s.request + 1, menu: localCommandsMenu()}
+		*s = monitorSuggestionState{active: true, session: m.monitorPrompt.session, request: s.request + 1, menu: m.localCommandsMenu()}
 		return nil
 	}
 	*s = monitorSuggestionState{active: true, busy: true, session: m.monitorPrompt.session, request: s.request + 1}
@@ -96,7 +96,7 @@ func (m Model) withMonitorSuggestions(view string, colors palette) string {
 			label := ansi.Truncate(o.Label, popup.width-4, "…")
 			style := colors.dimmed().Background(colors.background)
 			if i == selected {
-				style = style.Foreground(colors.background).Background(colors.primary).Bold(true)
+				style = style.Foreground(colors.accent).Bold(true)
 			}
 			help := ansi.Truncate(" // "+strings.Join(strings.Fields(o.Help), " "), max(popup.width-4-ansi.StringWidth(label), 0), "…")
 			row := " " + style.Render(label) + colors.dimmed().Background(colors.background).Render(help) + " "
@@ -114,7 +114,11 @@ func (m Model) updateMonitorSuggestions(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if s.active && s.session == r.session && s.request == r.request {
 			s.busy = false
 			s.menu = r.menu
-			s.menu.Choices = append(s.menu.Choices, localStatusLineChoice())
+			if r.err != nil {
+				s.menu = m.localCommandsMenu()
+			} else {
+				s.menu = m.withLocalCommands(s.menu)
+			}
 			s.err = r.err != nil
 		}
 		return m, nil, true
