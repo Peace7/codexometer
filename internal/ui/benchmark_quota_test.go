@@ -55,6 +55,7 @@ func TestSubscriptionBenchmarkAccountingFailsClosedForUnknownCost(t *testing.T) 
 	accounting.start()
 	accounting.observe(codex.BenchmarkResult{
 		TaskID: codex.BenchmarkDigBench, TaskName: "DIGBENCH P-6", Model: "future-model", Effort: "high",
+		UsageKnown: true, Usage: codex.BenchmarkUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
 	})
 	accounting.finish()
 	combined := accounting.combine(codex.LiveUsageSnapshot{})
@@ -72,7 +73,7 @@ func TestSubscriptionBenchmarkAccountingRejectsInvalidKnownCost(t *testing.T) {
 	})
 	accounting.finish()
 	combined := accounting.combine(codex.LiveUsageSnapshot{})
-	if combined.APIEqUSD != 0 || combined.APIEqPricedCalls != 0 || combined.APIEqUnpricedCalls != 1 {
+	if combined.APIEqUSD != 0 || combined.APIEqPricedCalls != 0 || combined.APIEqInconsistentUsageCalls != 1 || combined.APIEqUnpricedCalls != 0 {
 		t.Fatalf("invalid known benchmark cost was accepted: %#v", combined)
 	}
 }
@@ -89,7 +90,7 @@ func TestSubscriptionBenchmarkAccountingRejectsUnvalidatedResponseUsage(t *testi
 	})
 	accounting.finish()
 	combined := accounting.combine(codex.LiveUsageSnapshot{})
-	if combined.APIEqUSD != 0 || combined.APIEqPricedCalls != 0 || combined.APIEqUnpricedCalls != 1 {
+	if combined.APIEqUSD != 0 || combined.APIEqPricedCalls != 0 || combined.APIEqMissingUsageCalls != 1 || combined.APIEqUnpricedCalls != 0 {
 		t.Fatalf("unvalidated response usage was accepted: %#v", combined)
 	}
 }
@@ -115,8 +116,8 @@ func TestSubscriptionBenchmarkAccountingFailsClosedForAbandonedActiveResult(t *t
 	accounting.abandonActiveResult()
 	accounting.finish()
 	combined := accounting.combine(codex.LiveUsageSnapshot{})
-	if combined.APIEqUnpricedCalls != 1 || combined.APIEqPricedCalls != 0 || combined.APIEqUSD != 0 {
-		t.Fatalf("abandoned benchmark result was not marked unpriced: %#v", combined)
+	if combined.APIEqMissingUsageCalls != 1 || combined.APIEqUnpricedCalls != 0 || combined.APIEqPricedCalls != 0 || combined.APIEqUSD != 0 {
+		t.Fatalf("abandoned benchmark result was not marked as missing response usage: %#v", combined)
 	}
 }
 
@@ -247,5 +248,83 @@ func TestSubscriptionBenchmarkRerunIsAccountedAgain(t *testing.T) {
 	combined := accounting.combine(codex.LiveUsageSnapshot{})
 	if combined.APIEqUSD != 4 || combined.APIEqPricedCalls != 2 {
 		t.Fatalf("rerun accounting = %#v", combined)
+	}
+}
+
+func TestBenchmarkDiagnosticDoesNotMaskNewerSessionFailure(t *testing.T) {
+	a := benchmarkQuotaAccounting{billingSource: codex.BenchmarkBillingSubscription}
+	a.start()
+	a.observe(codex.BenchmarkResult{Model: "unknown-benchmark", UsageKnown: true, Usage: codex.BenchmarkUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110}})
+	old := a.diagnostics[0].ObservedAt
+	current := codex.APIEqDiagnostic{Kind: codex.UsageIssueUnpriced, Counter: 1, Model: "unknown-live", SessionID: "live", Source: "exact response", ObservedAt: old.Add(time.Second)}
+	combined := a.combine(codex.LiveUsageSnapshot{APIEqUnpricedCalls: 1, APIEqDiagnostics: []codex.APIEqDiagnostic{current}})
+	if len(combined.APIEqDiagnostics) != 1 || combined.APIEqDiagnostics[0].Model != "unknown-live" || combined.APIEqDiagnostics[0].Counter != 2 {
+		t.Fatal("stale benchmark masked live failure", combined)
+	}
+}
+
+func TestBenchmarkFailureIdentifiesEarlierResponseModelAndCancellationTrial(t *testing.T) {
+	a := benchmarkQuotaAccounting{billingSource: codex.BenchmarkBillingSubscription}
+	a.start()
+	usage := codex.BenchmarkUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110}
+	a.observe(codex.BenchmarkResult{Model: "gpt-6-astra", ActualModel: "gpt-6-astra", Effort: "xhigh", UsageKnown: true, UsageSource: codex.BenchmarkUsageRawResponses, ResponseUsage: []codex.BenchmarkResponseUsage{{ResponseID: "failed", Model: "gpt-reserve", Usage: usage}, {ResponseID: "later", Model: "gpt-6-astra", Usage: usage}}})
+	issue := a.diagnostics[len(a.diagnostics)-1]
+	if issue.Model != "gpt-reserve" || issue.ResponseID != "failed" || a.unpricedCalls != 1 || len(a.diagnostics) != 1 || a.pricedCalls != 1 {
+		t.Fatal("failure attributed to final model rather than offending response", issue)
+	}
+	a.abandonActiveResult(codex.BenchmarkResult{Model: "gpt-6-astra", Effort: "xhigh"})
+	issue = a.diagnostics[len(a.diagnostics)-1]
+	if issue.Kind != codex.UsageIssueMissing || issue.Model != "gpt-6-astra" || issue.Effort != "xhigh" {
+		t.Fatal("cancellation lost known trial metadata", issue)
+	}
+}
+
+func TestBenchmarkMissingUsageDiagnosticIdentifiesOriginatingResponse(t *testing.T) {
+	a := benchmarkQuotaAccounting{billingSource: codex.BenchmarkBillingSubscription}
+	a.start()
+	usage := codex.BenchmarkUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110}
+	result := codex.BenchmarkResult{Model: "gpt-6-astra", ActualModel: "gpt-6-astra", UsageSource: codex.BenchmarkUsageRawResponses, UsageIssue: "raw response omitted usage", ResponseUsage: []codex.BenchmarkResponseUsage{
+		{ResponseID: "missing", Model: "gpt-reserve", UsageMissing: true, UsageIssue: "raw response omitted usage"},
+		{ResponseID: "later", Model: "gpt-6-astra", Usage: usage},
+	}}
+	a.observe(result)
+	a.observe(result)
+	if a.missingCalls != 1 || a.unpricedCalls != 0 || a.pricedCalls != 0 || a.costUSD != 0 || len(a.diagnostics) != 1 {
+		t.Fatal("missing response inflated counters or priced incomplete telemetry", a)
+	}
+	issue := a.diagnostics[0]
+	if issue.Kind != codex.UsageIssueMissing || issue.Model != "gpt-reserve" || issue.ResponseID != "missing" {
+		t.Fatal("missing benchmark attributed to final response", issue)
+	}
+}
+
+func TestBenchmarkAccountingReportsOnlyFailingResponses(t *testing.T) {
+	a := benchmarkQuotaAccounting{billingSource: codex.BenchmarkBillingSubscription}
+	a.start()
+	usage := codex.BenchmarkUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110}
+	a.observe(codex.BenchmarkResult{Model: "gpt-6-astra", UsageKnown: true, UsageSource: codex.BenchmarkUsageRawResponses, ResponseUsage: []codex.BenchmarkResponseUsage{
+		{ResponseID: "unknown", Model: "gpt-reserve", Usage: usage},
+		{ResponseID: "known", Model: "gpt-6-astra", Usage: usage},
+		{ResponseID: "another-unknown", Model: "unknown-provider", Usage: usage},
+	}})
+	want, _, _ := codex.EstimateStandardAPIEqCost("gpt-6-astra", usage)
+	if a.unpricedCalls != 2 || a.pricedCalls != 1 || math.Abs(a.costUSD-want) > 1e-12 || len(a.diagnostics) != 2 || a.diagnostics[0].ResponseID != "unknown" || a.diagnostics[1].ResponseID != "another-unknown" || a.diagnostics[1].Model != "unknown-provider" {
+		t.Fatal("mixed responses duplicated failures or discarded known cost", a)
+	}
+}
+
+func TestBenchmarkAggregateFailureIsRecordedOnce(t *testing.T) {
+	for _, invalidMeasuredCost := range []bool{false, true} {
+		a := benchmarkQuotaAccounting{billingSource: codex.BenchmarkBillingSubscription}
+		a.start()
+		result := codex.BenchmarkResult{Model: "gpt-6-astra", UsageIssue: "invalid raw response total: totalTokens overflowed", ResponseUsage: []codex.BenchmarkResponseUsage{{ResponseID: "one"}, {ResponseID: "two"}}}
+		if invalidMeasuredCost {
+			result.CostKnown = true
+			result.CostUSD = math.Inf(1)
+		}
+		a.observe(result)
+		if a.inconsistentCalls != 1 || len(a.diagnostics) != 1 || a.diagnostics[0].ResponseID != "" || a.pricedCalls != 0 || a.costUSD != 0 {
+			t.Fatal("aggregate failure attributed to each response", a)
+		}
 	}
 }

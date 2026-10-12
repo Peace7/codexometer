@@ -33,7 +33,7 @@ const (
 	// the published rates compiled into this release. Keep both in sync whenever
 	// standardAPIPrices changes.
 	StandardAPIPricingSourceURL   = "https://developers.openai.com/api/docs/pricing"
-	StandardAPIPricingRetrievedOn = "2026-09-30"
+	StandardAPIPricingRetrievedOn = "2026-10-12"
 )
 
 // BenchmarkUsage is the app-server token breakdown for one isolated turn.
@@ -111,9 +111,14 @@ func (c Client) BenchmarkBillingSource() BenchmarkBillingSource {
 
 // BenchmarkResponseUsage is the exact upstream usage for one Responses API
 // completion when the current Codex app-server exposes experimental raw events.
+// Missing or conflicting usage retains response identity for diagnostics;
+// UsageMissing distinguishes an omitted payload from valid all-zero usage.
 type BenchmarkResponseUsage struct {
-	ResponseID string
-	Usage      BenchmarkUsage
+	ResponseID   string
+	Model        string
+	Usage        BenchmarkUsage
+	UsageMissing bool
+	UsageIssue   string
 }
 
 type BenchmarkInteractionKind string
@@ -930,7 +935,7 @@ func (s *appServerSession) runBenchmark(
 				Usage      *BenchmarkUsage `json:"usage"`
 			}
 			if json.Unmarshal(params, &event) == nil && event.ThreadID == startedThread.Thread.ID && event.TurnID == startedTurn.Turn.ID {
-				telemetry.recordRawResponse(event.ResponseID, event.Usage)
+				telemetry.recordRawResponseForModel(event.ResponseID, event.Usage, result.ActualModel)
 			}
 		case "model/rerouted":
 			var event struct {
@@ -1163,6 +1168,8 @@ func (s *appServerSession) interruptBenchmarkTurn(
 }
 
 func applyBenchmarkMeasurements(result *BenchmarkResult, telemetry *benchmarkTelemetry) {
+	result.CostUSD, result.CostKnown, result.CostIssue = 0, false, ""
+	result.UsageKnown, result.UsageIssue = false, ""
 	telemetry.apply(result)
 	if result.ToolUsed {
 		result.CostIssue = "tool use prohibited: " + result.ToolType
@@ -1170,7 +1177,11 @@ func applyBenchmarkMeasurements(result *BenchmarkResult, telemetry *benchmarkTel
 		if result.UsageSource == BenchmarkUsageRawResponses {
 			result.CostKnown = true
 			for _, response := range result.ResponseUsage {
-				cost, known, issue := estimateSingleResponseAPICostWithIssue(result.ActualModel, response.Usage)
+				model := response.Model
+				if model == "" {
+					model = result.ActualModel
+				}
+				cost, known, issue := estimateSingleResponseAPICostWithIssue(model, response.Usage)
 				if !known {
 					result.CostUSD, result.CostKnown, result.CostIssue = 0, false, issue
 					break
@@ -1191,23 +1202,24 @@ type benchmarkTelemetry struct {
 	lastCumulative     BenchmarkUsage
 	hasLastCumulative  bool
 	rawResponses       []BenchmarkResponseUsage
-	rawIDs             map[string]struct{}
+	rawIDs             map[string]int
 	rawObserved        bool
 	rawMissingUsage    bool
 	issue              string
+	cumulativeIssue    string
 }
 
 func newBenchmarkTelemetry() *benchmarkTelemetry {
-	return &benchmarkTelemetry{rawIDs: make(map[string]struct{})}
+	return &benchmarkTelemetry{rawIDs: make(map[string]int)}
 }
 
 func (t *benchmarkTelemetry) recordCumulative(usage BenchmarkUsage) {
 	t.cumulativeObserved = true
 	if issue := validateBenchmarkUsage(usage); issue != "" {
-		t.setIssue("invalid cumulative usage: " + issue)
+		t.cumulativeIssue = "invalid cumulative usage: " + issue
 	}
 	if t.hasLastCumulative && !benchmarkUsageAtLeast(usage, t.lastCumulative) {
-		t.setIssue("cumulative usage regressed")
+		t.cumulativeIssue = "cumulative usage regressed"
 	}
 	t.cumulative = usage
 	t.lastCumulative = usage
@@ -1215,30 +1227,54 @@ func (t *benchmarkTelemetry) recordCumulative(usage BenchmarkUsage) {
 }
 
 func (t *benchmarkTelemetry) recordRawResponse(responseID string, usage *BenchmarkUsage) {
+	t.recordRawResponseForModel(responseID, usage, "")
+}
+
+func (t *benchmarkTelemetry) recordRawResponseForModel(id string, usage *BenchmarkUsage, model string) {
 	t.rawObserved = true
-	if strings.TrimSpace(responseID) == "" {
-		t.setIssue("raw response usage omitted response id")
-		return
-	}
-	if _, duplicate := t.rawIDs[responseID]; duplicate {
-		t.setIssue("duplicate raw response usage: " + responseID)
-		return
-	}
-	t.rawIDs[responseID] = struct{}{}
+	response := BenchmarkResponseUsage{ResponseID: id, Model: model, UsageMissing: usage == nil}
 	if usage == nil {
-		t.rawMissingUsage = true
+		response.UsageIssue = "raw response omitted usage"
+	} else {
+		response.Usage = *usage
+		if issue := validateBenchmarkUsage(*usage); issue != "" {
+			response.UsageIssue = "invalid raw response usage: " + issue
+		}
+	}
+	if strings.TrimSpace(id) == "" {
+		response.UsageIssue = "raw response usage omitted response id"
+		t.setIssue(response.UsageIssue)
+		t.rawResponses = append(t.rawResponses, response)
 		return
 	}
-	if issue := validateBenchmarkUsage(*usage); issue != "" {
-		t.setIssue("invalid raw response usage: " + issue)
+	if index, duplicate := t.rawIDs[id]; duplicate {
+		previous := &t.rawResponses[index]
+		if previous.Model == model && previous.UsageMissing == response.UsageMissing && previous.Usage == response.Usage {
+			return
+		}
+		previous.UsageIssue = "conflicting duplicate raw response usage: " + id
+		if previous.Model != model {
+			previous.UsageIssue = fmt.Sprintf("conflicting duplicate raw response model: %q versus %q", previous.Model, model)
+		}
+		t.setIssue(previous.UsageIssue)
+		return
 	}
-	t.rawResponses = append(t.rawResponses, BenchmarkResponseUsage{ResponseID: responseID, Usage: *usage})
+	t.rawIDs[id] = len(t.rawResponses)
+	t.rawResponses = append(t.rawResponses, response)
+	if response.UsageMissing {
+		t.rawMissingUsage = true
+	} else if response.UsageIssue != "" {
+		t.setIssue(response.UsageIssue)
+	}
 }
 
 func (t *benchmarkTelemetry) apply(result *BenchmarkResult) {
 	result.UsageObserved = t.cumulativeObserved || t.rawObserved
 	result.UsageSource = BenchmarkUsageUnavailable
 	result.ResponseUsage = append([]BenchmarkResponseUsage(nil), t.rawResponses...)
+	if t.rawObserved {
+		result.UsageSource = BenchmarkUsageRawResponses
+	}
 	if t.issue != "" {
 		result.UsageIssue = t.issue
 		return
@@ -1257,11 +1293,16 @@ func (t *benchmarkTelemetry) apply(result *BenchmarkResult) {
 			result.UsageIssue = "invalid raw response total: " + issue
 			return
 		}
-		if t.cumulativeObserved && rawTotal != t.cumulative {
-			result.UsageIssue = "raw and cumulative usage disagree"
-			return
-		}
+
 		result.Usage, result.UsageKnown, result.UsageSource = rawTotal, true, BenchmarkUsageRawResponses
+		return
+	}
+	if t.rawObserved && t.rawMissingUsage {
+		result.UsageIssue = "raw response omitted usage"
+		return
+	}
+	if t.cumulativeIssue != "" {
+		result.UsageIssue = t.cumulativeIssue
 		return
 	}
 	if t.cumulativeObserved {
@@ -1609,6 +1650,7 @@ type apiPrice struct {
 }
 
 var standardAPIPrices = map[string]apiPrice{
+	"gpt-5.2":       {input: 1.75, cached: 0.175, output: 14.00},
 	"gpt-6.1-sol":   {input: 2.00, cached: 0.10, cacheWrite: 2.50, cacheWriteKnown: true, output: 10.00, longInput: 4.00, longCached: 0.20, longCacheWrite: 5.00, longOutput: 15.00, longKnown: true},
 	"gpt-6-sol":     {input: 2.00, cached: 0.20, cacheWrite: 2.50, cacheWriteKnown: true, output: 10.00, longInput: 4.00, longCached: 0.40, longCacheWrite: 5.00, longOutput: 15.00, longKnown: true},
 	"gpt-6-luna":    {input: 0.10, cached: 0.01, cacheWrite: 0.125, cacheWriteKnown: true, output: 0.50, longInput: 0.20, longCached: 0.02, longCacheWrite: 0.25, longOutput: 0.75, longKnown: true},
@@ -1640,7 +1682,7 @@ func estimateSingleResponseAPICostWithIssue(model string, usage BenchmarkUsage) 
 	}
 	price, ok := priceForModel(model)
 	if !ok {
-		return 0, false, "no published price for model " + strings.TrimSpace(model)
+		return 0, false, "no maintained standard API price for model " + strings.TrimSpace(model)
 	}
 	if usage.CacheWriteInputTokens > 0 && !price.cacheWriteKnown {
 		return 0, false, "no published cache-write price for model " + strings.TrimSpace(model)
