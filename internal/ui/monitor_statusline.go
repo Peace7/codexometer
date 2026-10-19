@@ -9,7 +9,7 @@ import (
 )
 
 func (m Model) statusLineMenu() codex.SessionCommandMenu {
-	menu := codex.SessionCommandMenu{Title: "/statusline", Path: "statusline", Multiple: true, Help: "Choose fields for Codexometer's detail footer. Space/Enter toggles; C applies; Escape cancels. Left/Right reorders. This does not change Codex CLI configuration. Missing telemetry is omitted."}
+	menu := codex.SessionCommandMenu{Title: "/statusline", Path: "statusline", Multiple: true, Help: "Choose priority fields for session telemetry boxes and the detail footer. Space/Enter toggles; C applies; Escape cancels. Left/Right reorders. This does not change Codex CLI configuration. Missing telemetry is omitted."}
 	selected := statusline.Normalize(m.monitorStatusLine)
 	fields := statusline.Fields()
 	// Keep selected fields in display order, followed by the remaining fields.
@@ -47,6 +47,12 @@ func (m Model) monitorStatusValues() map[string]string {
 	if !ok {
 		return nil
 	}
+	return m.monitorStatusValuesFor(s)
+}
+
+// Both the detail footer and every telemetry box use the same per-session
+// values. Rendering an unselected row must never borrow the selected session.
+func (m Model) monitorStatusValuesFor(s monitorSession) map[string]string {
 	state := monitorSessionAttentionLabel(s)
 	if state == "" {
 		if s.working {
@@ -59,6 +65,37 @@ func (m Model) monitorStatusValues() map[string]string {
 		state = "STALE"
 	}
 	return statusline.Values(statusline.Data{Model: s.modelSettings.Model, Effort: s.modelSettings.ReasoningEffort, Speed: s.modelSettings.ServiceTier, Directory: s.workingDirectory, Name: s.name, ID: s.id, State: state, Source: s.preview.Source, Tokens: s.latest, Agents: s.agentCount})
+}
+
+func (m Model) monitorPriorityFields(s monitorSession) ([]string, map[string]bool) {
+	values := m.monitorStatusValuesFor(s)
+	selected := make(map[string]bool)
+	var lines []string
+	for _, id := range statusline.Normalize(m.monitorStatusLine) {
+		value := values[id]
+		switch id {
+		case "model-with-reasoning":
+			var parts []string
+			for _, field := range []string{"model", "reasoning"} {
+				if values[field] != "" && !selected[field] {
+					parts = append(parts, values[field])
+					selected[field] = true
+				}
+			}
+			value = strings.Join(parts, " ")
+		case "model", "reasoning":
+			if selected[id] {
+				continue
+			}
+		}
+		if value != "" {
+			selected[id] = true
+			if id != "run-state" { // The essential state line is already first.
+				lines = append(lines, value)
+			}
+		}
+	}
+	return lines, selected
 }
 
 func (m Model) monitorStatusLineText(width int, copyLabel string) string {
@@ -77,7 +114,7 @@ func (m Model) monitorStatusLineText(width int, copyLabel string) string {
 }
 
 func (m Model) monitorStatusLineVisible(width int) bool {
-	if m.meterView != viewMonitor || m.monitorContextDetail == "" || m.contextTargetHidden() || m.monitorCommands.open || m.monitorQueue.open {
+	if m.meterView != viewMonitor || m.monitorContextDetail == "" || m.contextTargetHidden() || m.monitorQueue.open {
 		return false
 	}
 	return m.monitorStatusLineText(width, m.renderMonitorCopy(width, m.monitorContextDetail, paletteFor(m.theme))) != ""

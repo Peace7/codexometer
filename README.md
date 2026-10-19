@@ -592,7 +592,7 @@ codexometer --codex /path/to/codex
 | `o` | Arm Close All in the Sessions overview; press again to confirm, or `Esc` to cancel |
 | `g` | Cycle available trend periods in Quota → Pace |
 | `h` | Toggle the trace in Quota → Pace; in Sessions, reset all rows to graph-only / split detail-and-graph, closing full detail and clearing individual row choices |
-| `Left` / `Right` | In Sessions, less / more detail for the selected session: graph ↔ split ↔ wide ↔ full screen; stops at either end |
+| `Left` / `Right` | In Sessions, highlight attention pills or cycle status filters when that header area has focus; otherwise less / more detail for the selected session: graph ↔ split ↔ wide ↔ full screen; stops at either end |
 | `b` | Run the selected benchmark scope (Benchmark view only) |
 | `a` | Arm, then confirm, Run All (Benchmark view only) |
 | `x` | Dismiss the selected Sessions row; close Benchmark detail/Scope, or stop an active suite and retain its incomplete trial |
@@ -602,8 +602,8 @@ codexometer --codex /path/to/codex
 | `Left` / `Right` | Page Usage history, or select the previous or next benchmark suite |
 | `f` | Show all, passed, or failed benchmark results |
 | `w` | Select Weekly in Usage, or cycle Cost, Balanced, and Speed benchmark ranking weights |
-| `Up` / `Down` | Select a session row or Benchmark row, or scroll Sessions full detail / open Benchmark detail (outside a focused editor) |
-| `Enter` / `Space` | Open a selected Benchmark result, or toggle a Scope checkbox; in Sessions full detail, `Enter` focuses an available reply editor or submits its text |
+| `Up` / `Down` | Select a session row or scroll full detail. Up beyond the first row/top of detail moves through visible attention pills to summary filters; Down retraces that path. Select a Benchmark row or scroll its open detail. Focused editors retain their own arrows |
+| `Enter` / `Space` | Open a selected Benchmark result, or toggle a Scope checkbox; in Sessions, Enter opens a keyboard-highlighted attention pill. Otherwise in full detail, Enter focuses an available reply editor or submits its text |
 | `c` | Copy an eligible Sessions reply while its detail is shown, confirm an armed session approval, select Cumulative in Usage, or copy the Benchmark matrix/open run detail; types normally in a focused editor |
 | `l` | Clear accumulated Benchmark results while no suite is running |
 | `Page Up` / `Page Down` | Page Usage history, session rows, or Benchmark results; scroll Sessions full detail / Benchmark detail (outside a focused editor) |
@@ -1290,13 +1290,14 @@ same short ID and session name (directory fallback when unnamed), shortening
 their labels as space tightens. Click a highlighted session status to open its
 full detail and any native approval/input request; this only navigates.
 
-Session rows prioritise the root session's latest observed model, reasoning effort
-and Fast setting directly below the token count, for example
-`gpt-6-astra medium fast`. These are observed selections from persisted turn contexts
+Terminal session rows keep the state first, then prioritise the fields selected
+through `/statusline` in their configured order, in bold. Defaults include the
+root session's latest observed model/reasoning, service tier, total tokens and
+directory. Model settings are observed selections from persisted turn contexts
 and settings events, not proof of the backend-resolved model or delivered speed.
 Changes appear once Codex records them; an unrecorded CLI selection cannot be seen.
 Child-agent settings never replace the root's selection. Missing fields are omitted;
-no `fast` suffix means Fast was not observed, not proof that it is off.
+missing speed information means the tier was not observed, not proof that Fast is off.
 
 The row no longer repeats the directory already shown in its border or the status
 already shown in its badge. Generic `ROOT` text and the extra file-activity age line
@@ -1523,8 +1524,47 @@ The old `i` and Enter detail-navigation shortcuts have been removed.
 Clickable **[←] [→]** buttons sit at the top-right of each row's rightmost box
 (graph or detail), and on the full-detail box. They mirror the cursor keys:
 Left is dimmed and inactive at graph-only; Right is dimmed and inactive at full
-detail. The **SESSION TOTALS** header also has **[↑] [↓]** session-selection buttons,
-disabled at the first/last visible session. Dismissed sessions are skipped.
+detail. The **SESSION TOTALS** header also has **[↑] [↓]** session-selection buttons.
+Up beyond the first session (or the top of full-detail text) focuses the visible
+attention pills first. Left/Right highlights a pill without opening it; Enter
+opens its session detail or specific review. The session list enters at the
+first visible pill; full detail targets the pill for its current review, skipping
+to the summary if that pill is no longer visible. Returning from the summary
+never substitutes another pill for a review or pager that has disappeared.
+A further Up focuses the summary
+categories; Left/Right then cycles
+**Sessions (all) → Active → Working → Approval → Input → Check** and filters the rows.
+Click a category label or count to select it directly. The selected filter is
+underlined; keyboard focus and hover add a theme-coloured highlight. Down retraces
+the path through pills to the session list or current full detail, skipping
+header levels that are not displayed. The currently open detail remains visible
+until a pill is opened or a filter is chosen. Pill keyboard focus is underlined
+and tracked by action identity, separately from the current-session marker;
+reordering cannot redirect Enter to another pill, and a vanished or hidden pill
+cannot be opened. Overflow's More pill is also keyboard accessible. Escape from
+the pills returns to the session/detail; Escape from summary filters clears the
+filter in the overview, or returns to the existing full detail without changing
+it. Composer and menu arrows keep their own behaviour. Empty categories
+remain selectable and show an explicit no-results message. Filters update with
+live session states and are not persisted across launches.
+
+**Active** includes sessions identified as active by the latest observation,
+including working sessions and those waiting for input, approval or their next
+turn. It excludes inferred **CHECK SESSION** entries and retained inactive rows.
+An app-server-confirmed loaded, idle/ready session remains Active even after
+five minutes without session-file updates; that confirmation is not carried
+forward if it disappears or the daemon disconnects. Without the daemon, the
+existing recent-activity and attention signals remain best-effort.
+**Working** is narrower: a currently processing turn. Active therefore overlaps
+the other categories; the counts are not separate parts to add together.
+
+The summary counts and token totals remain global, excluding dismissed sessions
+from state counts but retaining their measured tokens. Attention pills stay
+available across filters; opening an excluded session clears the filter to keep
+its row accessible. **Close All** only dismisses matching, non-dismissed sessions
+after confirmation; filtering never stops telemetry collection or changes the
+Zero baseline. Dismissed sessions are skipped, and Down is disabled at the last
+matching session.
 These up/down session-selection buttons disappear in full detail, where Up/Down scroll the text.
 On narrow boxes, arrow buttons are omitted if they cannot fit; keyboard and
 background half-click navigation still work. Hide/Show and Close retain priority.
@@ -1628,20 +1668,25 @@ lists scroll within the available space (arrows or mouse wheel in the terminal).
 Up/Down selects, Tab completes the name, Enter opens its options and Escape
 dismisses suggestions while retaining the draft and typing focus. Suggestions
 are fetched asynchronously and filtered locally. They also work in a selected
-wide terminal session row when space permits. Outside the full-detail composer,
-press `/` to open the full command browser. Use arrows and Enter to browse, **C** to confirm a
-setting change. **Back** (Left) returns to the previous visited command screen;
-it appears only when there is a previous screen or a provisional review to undo.
-Opening `/fast` directly starts at its options, so it has no Back action until
-reviewing. **Cancel** (Escape) closes the entire menu and returns typing focus
-to the composer with the slash-command draft intact. Back from a rename or
-directory review restores the edited input. Speed menus
-keep all options visible: Up/Down highlights a choice, **Enter REVIEW** stages it,
+wide terminal session row when space permits. In terminal full detail, pressing
+`/` also focuses the composer and starts this expansion when a composer is
+available; read-only sessions retain a command picker for local display settings.
+Submenus stay in that same expanding list above the command line: type to filter
+the current level, Up/Down selects, Tab completes and Enter drills in or reviews.
+In both session-list and full-screen detail, the list fits its contents, including
+previews and controls, up to the width of the surrounding detail pane. Text that
+still cannot fit is shortened with an ellipsis. Width updates on resize.
+**Alt+Left** or the **Back** button returns one level (Left/Backspace also works
+when the option filter is empty). **Escape** closes the list, retaining the draft
+and typing focus. Back from a rename or directory review restores the edited
+argument in the composer. Speed menus
+initially show all options: Up/Down highlights a choice, **Enter REVIEW** stages it,
 and **C CONFIRM** applies it. The separate **CURRENT** marker identifies the
 existing speed; the highlighted choice uses bright text without a reversed background.
 The action line shows only the current next step, Enter Review or C Confirm,
 without a second confirmation hint. Settings blocked during an active turn show
-**WAITING FOR IDLE**, with **F REFRESH** to read their availability again;
+**WAITING FOR IDLE**, with **Ctrl+R REFRESH** in the terminal composer
+(**F REFRESH** in the read-only picker) to read their availability again;
 **HELP** identifies genuine browse-only entries. Model, reasoning and speed changes are provisional until C;
 reviewing or changing the highlight sends no settings update. Buttons
 are clickable. Writable web mode exposes the same catalogue through
@@ -1662,14 +1707,19 @@ are clickable. Writable web mode exposes the same catalogue through
 | `/copy` | **Local:** reuse the selected session’s Copy action, copying the full observed reply/activity text. Ineligible or missing text gives feedback. |
 | `/theme` | **Local:** choose and save a Codexometer display theme; terminal picker or existing browser theme selector. |
 | `/exit`, `/quit` | **Local:** quit the Codexometer terminal interface; in the browser, leave session detail for Sessions. Codex sessions and the browser server continue running. |
-| `/statusline` | **Local Codexometer multi-select:** choose and reorder detail-footer fields with a live preview. Works without the shared daemon. |
+| `/statusline` | **Local Codexometer multi-select:** choose and reorder detail-footer fields with a live preview. In the terminal, the same selection also prioritises the values in each session's left-hand telemetry box. Works without the shared daemon. |
 
 The detail footer uses theme-highlighted text in the bottom border in terminal mode, and
 the last line of full session detail on web. Its default fields are observed
 model/reasoning, speed, total session tokens (including linked agents) and
 directory. `/statusline` also offers model alone, reasoning alone, session name,
 full session ID, observed state, linked-agent count and context source. Missing
-values are omitted. This is Codexometer's supported field set; the Codex CLI's
+values are omitted. In terminal session rows, selected fields appear in the same
+order, in bold, below the essential state badge. Each row uses its own session's
+values, not those of the selected session. Lower-priority quota, activity and
+latency information uses any remaining rows; configured values are never replaced
+by pagination hints. An explicit empty selection restores the usual telemetry
+priorities while hiding the detail footer. This is Codexometer's supported field set; the Codex CLI's
 own client-side picker is not dynamically exposed by app-server.
 
 In the terminal, **Space/Enter** toggles a field, **Left/Right** changes its order,
@@ -1681,6 +1731,16 @@ are display preferences and do not modify Codex CLI configuration. Terminal
 footer text shortens to fit and leaves the Copy button in place. A blank row
 separates a visible terminal status line from the global footer; very short
 terminals omit the status line and gap to preserve the composer and controls.
+
+The terminal `/statusline` checkbox list uses the same composer expansion, but
+deliberately does not filter: **Up/Down** selects, **Space** toggles, **Left/Right**
+reorders and **Enter** applies the local display preferences. Escape discards
+unapplied changes. Other menu levels keep help subdued on one line, shortened
+with an ellipsis when needed. Model, reasoning, speed, name and directory changes
+still require separate review and **C CONFIRM**; shrinking the terminal cannot
+confirm a hidden control. The composer and conversation remain in place through
+all levels, including in a wide session row. `/commands` also opens the root
+list, including local commands without a shared daemon.
 
 Codex does not expose a general slash-command discovery/execution API. These are
 explicit adapters to supported app-server catalogues, not a reproduction of

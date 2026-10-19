@@ -75,6 +75,14 @@ func (m Model) suggestionChoices() []codex.SessionCommandChoice {
 }
 
 func (m Model) withMonitorSuggestions(view string, colors palette) string {
+	if m.monitorCommands.open {
+		popup := m.monitorCommandPopup()
+		if popup.height == 0 {
+			return view
+		}
+		box := m.renderMonitorCommands(popup.width, popup.height, colors)
+		return lipgloss.NewCompositor(lipgloss.NewLayer(view), lipgloss.NewLayer(box).X(popup.x).Y(popup.y).Z(1)).Render()
+	}
 	popup, start := m.monitorSuggestionPopup()
 	if popup.height == 0 {
 		return view
@@ -82,13 +90,7 @@ func (m Model) withMonitorSuggestions(view string, colors palette) string {
 	choices := m.suggestionChoices()
 	var lines []string
 	if len(choices) == 0 {
-		text := "No matching slash commands."
-		if m.monitorSuggestions.busy {
-			text = "Loading slash commands…"
-		} else if m.monitorSuggestions.err {
-			text = "Command catalogue unavailable. Use Codex."
-		}
-		lines = append(lines, colors.dimmed().Render(ansi.Truncate(text, popup.width-4, "…")))
+		lines = append(lines, colors.dimmed().Render(ansi.Truncate(m.monitorSuggestionMessage(), popup.width-4, "…")))
 	} else {
 		selected := min(m.monitorSuggestions.selected, len(choices)-1)
 		for i := start; i < min(start+popup.height-2, len(choices)); i++ {
@@ -103,9 +105,18 @@ func (m Model) withMonitorSuggestions(view string, colors palette) string {
 			lines = append(lines, lipgloss.NewStyle().Background(colors.background).Width(popup.width-2).Render(row))
 		}
 	}
-	box := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colors.primary).
-		Background(colors.background).BorderBackground(colors.background).Width(popup.width).Render(strings.Join(lines, "\n"))
+	box := renderMonitorPopup("", strings.Join(lines, "\n"), popup.width, colors)
 	return lipgloss.NewCompositor(lipgloss.NewLayer(view), lipgloss.NewLayer(box).X(popup.x).Y(popup.y).Z(1)).Render()
+}
+
+func (m Model) monitorSuggestionMessage() string {
+	if m.monitorSuggestions.busy {
+		return "Loading slash commands…"
+	}
+	if m.monitorSuggestions.err {
+		return "Command catalogue unavailable. Use Codex."
+	}
+	return "No matching slash commands."
 }
 
 func (m Model) updateMonitorSuggestions(msg tea.Msg) (Model, tea.Cmd, bool) {
@@ -196,9 +207,30 @@ func (m Model) monitorSuggestionPopup() (popup monitorRect, start int) {
 	if !m.suggestionsActive() || m.monitorSuggestions.session != m.monitorPrompt.session {
 		return
 	}
+	area := m.monitorComposerPopupArea()
+	choices := m.suggestionChoices()
+	count := min(max(len(choices), 1), max(area.height-3, 0))
+	if count == 0 {
+		return
+	}
+	width := 4
+	for _, o := range choices {
+		width = max(width, ansi.StringWidth(o.Label+" // "+strings.Join(strings.Fields(o.Help), " "))+4)
+	}
+	if len(choices) == 0 {
+		width = ansi.StringWidth(m.monitorSuggestionMessage()) + 4
+	}
+	width = m.monitorPopupWidth(area, width)
+	start = max(min(m.monitorSuggestions.selected, max(len(choices)-1, 0))-count+1, 0)
+	return monitorRect{x: area.x, y: area.y + area.height - count - 2, width: width, height: count + 2}, start
+}
+
+func (m Model) monitorComposerPopupArea() (area monitorRect) {
 	w, h := m.monitorPromptSize()
+	// Zero composer rows still leave the detail body available to read-only
+	// command pickers; a live prompt offer is not required for local commands.
 	rows := m.monitorPromptRows(w, h)
-	if rows == 0 || w < 12 {
+	if w < 12 || h < 4 {
 		return
 	}
 	g := m.monitorDashboardLayout()
@@ -223,17 +255,7 @@ func (m Model) monitorSuggestionPopup() (popup monitorRect, start int) {
 		}
 	}
 	_, _, cy := monitorContextBodyLayout(h, rows)
-	choices := m.suggestionChoices()
-	count := min(max(len(choices), 1), max(cy-3, 0))
-	if count == 0 {
-		return
-	}
-	width := min(w-4, 44)
-	for _, o := range choices {
-		width = min(w-4, max(width, ansi.StringWidth(o.Label+" // "+strings.Join(strings.Fields(o.Help), " "))+4))
-	}
-	start = max(min(m.monitorSuggestions.selected, max(len(choices)-1, 0))-count+1, 0)
-	return monitorRect{x: x, y: y + cy - count - 2, width: width, height: count + 2}, start
+	return monitorRect{x: x, y: y, width: w - 4, height: cy}
 }
 
 func (m Model) monitorSuggestionAt(x, y int) int {

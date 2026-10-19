@@ -188,9 +188,6 @@ func (m Model) contextDetailSession() (monitorSession, bool) {
 }
 
 func (m Model) renderMonitorContextDetail(width, height int, colors palette) string {
-	if m.monitorCommands.open {
-		return m.renderMonitorCommands(width, height, colors)
-	}
 	if m.monitorQueue.open {
 		return m.renderQueueEditor()
 	}
@@ -271,6 +268,7 @@ func monitorContextBodyLayout(height, controls int) (textRows, gap, controlY int
 }
 
 func (m *Model) toggleMonitorContext() {
+	m.clearMonitorHeaderFocus()
 	m.clearQuotaConfirmation()
 	m.stashMonitorDraft()
 	m.monitorPrompt = monitorPromptState{}
@@ -365,7 +363,13 @@ func (m Model) updateMonitorContextKey(key string) (Model, tea.Cmd, bool) {
 		case "end":
 			m.scrollMonitorContext(m.monitorContextScrollLimit())
 		case "up":
-			m.scrollMonitorContext(-1)
+			if m.monitorContextScroll == 0 {
+				if !m.focusMonitorAttention(false) {
+					m.focusMonitorHeaderSummary()
+				}
+			} else {
+				m.scrollMonitorContext(-1)
+			}
 		case "down":
 			m.scrollMonitorContext(1)
 		case "pgup":
@@ -392,6 +396,9 @@ func (m Model) monitorContextAt(x, y int) string {
 	m.geometry = &monitorGeometryCache{}
 	if m.meterView != viewMonitor || m.loading && len(m.snapshot.Meters()) == 0 {
 		return ""
+	}
+	if hit := m.monitorFilterAt(x, y); hit != "" {
+		return hit
 	}
 	if hit := m.monitorAttentionAt(x, y); hit != "" {
 		return hit
@@ -517,6 +524,12 @@ func (m Model) updateMonitorContextMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool
 	_, click := msg.(tea.MouseClickMsg)
 	m.monitorContextHover = m.monitorContextAt(mouse.X, mouse.Y)
 	if click && mouse.Button == tea.MouseLeft && m.monitorContextHover != "" {
+		if m.monitorContextHover != "session-up" && m.monitorContextHover != "session-down" {
+			m.clearMonitorHeaderFocus()
+		}
+		if m.activateMonitorFilter(m.monitorContextHover) {
+			return m, nil, true
+		}
 		if id, ok := strings.CutPrefix(m.monitorContextHover, "copy:"); ok {
 			next, cmd := m.activateMonitorCopy(id)
 			return next, cmd, true
@@ -532,9 +545,13 @@ func (m Model) updateMonitorContextMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool
 		case "navigation-disabled":
 			return m, nil, true
 		case "session-up":
-			m.selectMonitorSession(-1)
+			if !m.monitorFilterKey("up") {
+				m.selectMonitorSession(-1)
+			}
 		case "session-down":
-			m.selectMonitorSession(1)
+			if !m.monitorFilterKey("down") {
+				m.selectMonitorSession(1)
+			}
 		case "prompt":
 			m.showLiveMonitorHistory()
 			cmd := m.focusMonitorPrompt()
@@ -575,8 +592,10 @@ func (m Model) updateMonitorContextMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool
 		if mouse.Y >= g.meterY && mouse.Y < g.meterY+g.meterHeight {
 			switch mouse.Button {
 			case tea.MouseWheelUp:
+				m.clearMonitorHeaderFocus()
 				m.scrollMonitorContext(-3)
 			case tea.MouseWheelDown:
+				m.clearMonitorHeaderFocus()
 				m.scrollMonitorContext(3)
 			}
 			return m, nil, true

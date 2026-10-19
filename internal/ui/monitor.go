@@ -166,6 +166,9 @@ func (m Model) renderMonitorSummary(width, height int, colors palette, navigatio
 	}
 	innerWidth := max(width-4, 1)
 	lines := m.monitorSummaryLines(innerWidth, max(height-3, 1), colors)
+	// Extremely short/narrow panes may not fit every category. Never let the
+	// summary enlarge its frame and push session controls outside the viewport.
+	lines = lines[:min(len(lines), max(height-2, 1))]
 	status := " // " + i18n.Format("ELAPSED %s  //  AVG TOK/MIN %s", formatElapsed(elapsed), formatTokens(m.monitorAverageRate))
 	if m.monitorError != "" {
 		status = " // " + terminalLabel(hint)
@@ -181,7 +184,11 @@ func (m Model) renderMonitorSummary(width, height int, colors palette, navigatio
 	if navigation {
 		action = m.renderMonitorNavigation(width, "", false, colors)
 	}
-	return frameSizedWithTitleAction(width, max(height-2, 1), i18n.Text("SESSION TOTALS"), action, strings.Join(lines, "\n"), colors.primary, colors)
+	title := i18n.Text("SESSION TOTALS")
+	if m.monitorSummaryFocused {
+		title += " // ← →"
+	}
+	return frameSizedWithTitleAction(width, max(height-2, 1), title, action, strings.Join(lines, "\n"), colors.primary, colors)
 }
 
 func (m Model) renderMonitorButton(width, height int, label string, id footerButtonID, enabled bool, colors palette) string {
@@ -216,6 +223,10 @@ func (m Model) renderMonitorGraph(width, height int, colors palette) string {
 func (m Model) renderMonitorSessions(width, height int, colors palette) string {
 	visible, rowHeights, pageLabel := m.monitorSessionPage(height)
 	if len(visible) == 0 {
+		if m.monitorFilter != monitorFilterAll {
+			message := ansi.Truncate(i18n.Text("NO RESULTS MATCH THE ACTIVE FILTER"), max(width-4, 1), "…")
+			return frameSized(width, max(height-2, 1), i18n.Text("SESSIONS"), colors.dimmed().Render(message), colors.primary, colors)
+		}
 		return m.renderMonitorGraph(width, height, colors)
 	}
 	rows := make([]string, 0, len(visible))
@@ -236,7 +247,7 @@ func (m Model) renderMonitorSessions(width, height int, colors palette) string {
 func (m Model) monitorSessionPage(height int) ([]monitorSession, []int, string) {
 	visible := make([]monitorSession, 0, len(m.monitorSessionData))
 	for _, session := range m.monitorSessionData {
-		if m.monitorSessionVisible(session) {
+		if m.monitorSessionInList(session) {
 			visible = append(visible, session)
 		}
 	}
@@ -321,6 +332,9 @@ func (m Model) renderMonitorSessionMetrics(width, height int, session monitorSes
 	if session.attention != codex.SessionAttentionNone {
 		status = monitorAttentionStatus(session.attention)
 	}
+	if m.monitorError != "" || m.monitorState != monitorRunning {
+		status = i18n.Text("STALE")
+	}
 	innerWidth := max(width-4, 1)
 	memberLabel := ""
 	if session.agentCount > 0 {
@@ -336,9 +350,22 @@ func (m Model) renderMonitorSessionMetrics(width, height int, session monitorSes
 	badge := m.renderMonitorSessionBadge(session, innerWidth, colors)
 	if badge != "" {
 		lines = append(lines, badge)
+	} else {
+		lines = append(lines, colors.label().Bold(true).Render(ansi.Truncate(status, innerWidth, "")))
 	}
-	if len(lines) < bodyRows {
-		lines = append(lines, colors.label().Render(ansi.Truncate(usageLine, innerWidth, "")))
+	fields, selectedFields := m.monitorPriorityFields(session)
+	for _, field := range fields {
+		if len(lines) < bodyRows {
+			lines = append(lines, colors.label().Bold(true).Render(ansi.Truncate(field, innerWidth, "…")))
+		}
+	}
+	appendPriority := func(value string) {
+		if value != "" && len(lines) < bodyRows {
+			lines = append(lines, colors.label().Bold(true).Render(ansi.Truncate(value, innerWidth, "")))
+		}
+	}
+	if !selectedFields["used-tokens"] {
+		appendPriority(usageLine)
 	}
 	appendLine := func(value string) {
 		if value != "" && len(lines) < bodyRows {
@@ -346,20 +373,19 @@ func (m Model) renderMonitorSessionMetrics(width, height int, session monitorSes
 		}
 	}
 	model := formatMonitorSessionModel(session)
-	if model != "" && len(lines) < bodyRows {
-		lines = append(lines, colors.label().Render(ansi.Truncate(model, innerWidth, "")))
+	if !selectedFields["model"] && !selectedFields["model-with-reasoning"] {
+		appendPriority(model)
 	}
 	priorityRows := len(lines)
 	if estimate := m.monitorSessionQuotaEstimate(share); estimate != "" {
 		appendLine(estimate)
 	}
-	if badge == "" {
-		appendLine(status)
-	}
-	if session.name != "" {
+	if session.name != "" && !selectedFields["current-dir"] {
 		appendLine(terminalLabel(session.workingDirectory))
 	}
-	appendLine(memberLabel)
+	if !selectedFields["agents"] {
+		appendLine(memberLabel)
+	}
 	appendLine(formatMonitorCallActivity(session, time.Now()))
 	if session.latestTTFTOK || session.peakTTFTOK {
 		appendLine(formatMonitorTTFT(session))
@@ -368,8 +394,13 @@ func (m Model) renderMonitorSessionMetrics(width, height int, session monitorSes
 		appendLine(formatMonitorOutput(session))
 	}
 	appendLine(i18n.Text("AVG TOK/MIN ") + formatTokens(session.averageRate))
-	if pageLabel != "" && (badge == "" || len(lines) > 1) && (model == "" || len(lines) > priorityRows) {
-		lines[len(lines)-1] = colors.dimmed().Render(ansi.Truncate(pageLabel+" // PGUP/PGDN", innerWidth, ""))
+	pageAction := ""
+	if pageLabel != "" {
+		if len(lines) > priorityRows {
+			lines[len(lines)-1] = colors.dimmed().Render(ansi.Truncate(pageLabel+" // PGUP/PGDN", innerWidth, ""))
+		} else {
+			pageAction = colors.dimmed().Render(ansi.Truncate(pageLabel, max(width-4, 0), "…"))
+		}
 	}
 	borderColor := colors.primary
 	if monitorNeedsAttention(session.attention) && session.id != m.monitorSelectedID {
@@ -379,7 +410,7 @@ func (m Model) renderMonitorSessionMetrics(width, height int, session monitorSes
 	if _, ok := monitorSessionDismissRect(width, 0); ok {
 		action = m.renderMonitorSessionDismiss(session.id, colors)
 	}
-	return frameSizedWithTitleAction(width, max(height-2, 1), title, action, strings.Join(lines, "\n"), borderColor, colors)
+	return frameSizedWithActions(width, max(height-2, 1), title, action, pageAction, strings.Join(lines, "\n"), borderColor, colors)
 }
 
 func formatMonitorSessionModel(session monitorSession) string {
@@ -807,7 +838,7 @@ func (m Model) monitorResetEnabled() bool {
 }
 
 func (m Model) monitorCloseAllEnabled() bool {
-	return m.monitorState == monitorRunning && m.visibleMonitorSessionCount() > 0
+	return m.monitorState == monitorRunning && m.monitorListSessionCount() > 0
 }
 
 func (m Model) monitorElapsed(now time.Time) time.Duration {

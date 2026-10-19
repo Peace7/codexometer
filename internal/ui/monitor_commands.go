@@ -19,6 +19,7 @@ type monitorCommandLevel struct {
 	path     string
 	selected int
 	input    string
+	draft    string
 }
 
 type monitorCommandsState struct {
@@ -34,6 +35,8 @@ type monitorCommandsState struct {
 	input                   textinput.Model
 	history                 []monitorCommandLevel
 	restore                 *monitorCommandLevel
+	inline                  bool
+	prefix                  string
 }
 type monitorCommandsResult struct {
 	session string
@@ -49,8 +52,22 @@ func (m *Model) loadMonitorCommands(path string) tea.Cmd {
 	p.reviewedChoice = ""
 	p.until = time.Time{}
 	path = strings.TrimPrefix(strings.TrimSpace(path), "/")
+	if path == "commands" {
+		path = ""
+	}
 	p.menu.Path = path
+	if p.inline && !commandInputReview(path) {
+		p.prefix = "/" + strings.ReplaceAll(path, "/", " ")
+		if path != "" {
+			p.prefix += " "
+		}
+		m.monitorPrompt.input.SetValue(p.prefix)
+		m.monitorPrompt.input.CursorEnd()
+	}
 	if menu, local := m.localMonitorMenu(path); local {
+		if p.inline && path == "statusline" {
+			menu.Help = strings.Replace(menu.Help, "Space/Enter toggles; C applies", "Space toggles; Enter applies", 1)
+		}
 		p.input.Blur()
 		p.busy = false
 		p.detail = false
@@ -64,6 +81,7 @@ func (m *Model) loadMonitorCommands(path string) tea.Cmd {
 		}
 		if p.restore != nil {
 			p.selected = min(p.restore.selected, max(len(menu.Choices)-1, 0))
+			m.restoreCommandDraft()
 			p.restore = nil
 		}
 		return nil
@@ -76,6 +94,7 @@ func (m *Model) loadMonitorCommands(path string) tea.Cmd {
 			p.scroll = 0
 			if p.restore != nil {
 				p.selected = min(p.restore.selected, len(p.menu.Choices)-1)
+				m.restoreCommandDraft()
 				p.restore = nil
 			}
 			p.busy = false
@@ -105,7 +124,7 @@ func (m *Model) loadMonitorCommands(path string) tea.Cmd {
 // History records visited screens, not RPC path segments (tier/flex is one screen).
 func (m *Model) navigateMonitorCommands(path string) tea.Cmd {
 	p := &m.monitorCommands
-	p.history = append(append([]monitorCommandLevel(nil), p.history...), monitorCommandLevel{path: p.menu.Path, selected: p.selected, input: p.input.Value()})
+	p.history = append(append([]monitorCommandLevel(nil), p.history...), monitorCommandLevel{path: p.menu.Path, selected: p.selected, input: p.input.Value(), draft: m.monitorPrompt.input.Value()})
 	return m.loadMonitorCommands(path)
 }
 
@@ -154,6 +173,9 @@ func (m *Model) cancelMonitorCommands() tea.Cmd {
 
 func (m Model) openMonitorCommands(path string) (Model, tea.Cmd, bool) {
 	path = strings.TrimPrefix(strings.TrimSpace(path), "/")
+	if path == "commands" {
+		path = ""
+	}
 	if updated, cmd, local := m.runLocalMonitorCommand(path); local {
 		return updated, cmd, true
 	}
@@ -165,9 +187,23 @@ func (m Model) openMonitorCommands(path string) (Model, tea.Cmd, bool) {
 	if id == "" {
 		return m, nil, true
 	}
-	m.monitorPrompt.input.Blur()
-	m.monitorContextDetail = id
-	m.monitorCommands = monitorCommandsState{open: true, session: id, request: m.monitorCommands.request, hover: -1}
+	m.clearMonitorHeaderFocus()
+	var history []monitorCommandLevel
+	if path != "" && m.suggestionsActive() && m.monitorSuggestions.session == id {
+		for i, choice := range m.monitorSuggestions.menu.Choices {
+			if choice.Next == path {
+				history = []monitorCommandLevel{{path: "", selected: i, draft: m.monitorPrompt.input.Value()}}
+				break
+			}
+		}
+	}
+	inline := m.monitorPrompt.input.Focused() && codex.IsSessionCommand(m.monitorPrompt.input.Value())
+	if !inline {
+		m.monitorPrompt.input.Blur()
+	}
+	m.monitorApprovalConfirm = ""
+	m.clearQuotaConfirmation()
+	m.monitorCommands = monitorCommandsState{open: true, session: id, request: m.monitorCommands.request, hover: -1, history: history, inline: inline}
 	cmd := m.loadMonitorCommands(path)
 	return m, cmd, true
 }
@@ -183,6 +219,15 @@ func (m Model) commandChoice() (codex.SessionCommandChoice, bool) {
 	p := m.monitorCommands
 	if p.selected < 0 || p.selected >= len(p.menu.Choices) {
 		return codex.SessionCommandChoice{}, false
+	}
+	if p.inline {
+		found := false
+		for _, i := range m.commandChoiceIndices() {
+			found = found || i == p.selected
+		}
+		if !found {
+			return codex.SessionCommandChoice{}, false
+		}
 	}
 	return p.menu.Choices[p.selected], true
 }
@@ -221,14 +266,25 @@ func (m Model) chooseMonitorCommand() (Model, tea.Cmd, bool) {
 
 func (m Model) confirmMonitorCommand() (Model, tea.Cmd, bool) {
 	p := &m.monitorCommands
+	if p.menu.Picker && !p.until.IsZero() && time.Now().After(p.until) {
+		p.reviewedChoice = ""
+	}
+	popup := m.monitorCommandPopup()
+	visible := false
+	for _, button := range m.commandFooter(popup.width) {
+		visible = visible || button.action == "confirm"
+	}
+	if !p.open || popup.height < 4 || !visible {
+		return m, nil, true
+	}
 	if p.open && p.menu.Multiple && p.menu.Path == "statusline" {
 		m.monitorStatusLine = statusline.Normalize(statusLineSelection(p.menu))
 		if codex.IsSessionCommand(m.monitorPrompt.input.Value()) {
 			m.monitorPrompt.input.Reset()
 		}
 		m.persistPreferences()
-		m.closeMonitorCommands()
-		return m, nil, true
+		cmd := m.finishLocalMonitorCommand()
+		return m, cmd, true
 	}
 	o, ok := m.commandChoice()
 	reviewed := p.detail || (p.menu.Picker && p.reviewedChoice == o.ID)
@@ -260,6 +316,7 @@ func (m Model) confirmMonitorCommand() (Model, tea.Cmd, bool) {
 
 type commandDisplayRow struct {
 	text   string
+	help   string
 	choice int
 	action string
 }
@@ -267,9 +324,12 @@ type commandDisplayRow struct {
 func (m Model) monitorCommandRows(width, height int) []commandDisplayRow {
 	p := m.monitorCommands
 	w := max(width-4, 1)
-	capacity := max(height-5, 1)
-	if p.menu.Multiple {
-		capacity = max(height-6, 1)
+	capacity := max(m.commandContentRows(height), 1)
+	if !p.inline {
+		capacity = max(height-5, 1)
+		if p.menu.Multiple {
+			capacity = max(height-6, 1)
+		}
 	}
 	var rows []commandDisplayRow
 	if p.busy {
@@ -286,9 +346,13 @@ func (m Model) monitorCommandRows(width, height int) []commandDisplayRow {
 		if label == "" {
 			label = "Session name"
 		}
-		rows = append(rows, commandDisplayRow{text: strings.ToUpper(label), choice: -1})
-		p.input.SetWidth(max(w-2, 1))
-		rows = append(rows, commandDisplayRow{text: p.input.View(), choice: -1})
+		if capacity > 1 {
+			rows = append(rows, commandDisplayRow{text: strings.ToUpper(label), choice: -1})
+		}
+		if !p.inline {
+			p.input.SetWidth(max(w-2, 1))
+			rows = append(rows, commandDisplayRow{text: p.input.View(), choice: -1})
+		}
 		for _, line := range strings.Split(ansi.Hardwrap(p.menu.Help, w, true), "\n") {
 			if len(rows) >= capacity {
 				break
@@ -297,7 +361,7 @@ func (m Model) monitorCommandRows(width, height int) []commandDisplayRow {
 		}
 		return rows
 	}
-	if p.detail {
+	if p.detail && !p.inline {
 		o, ok := m.commandChoice()
 		if !ok {
 			return nil
@@ -340,8 +404,18 @@ func (m Model) monitorCommandRows(width, height int) []commandDisplayRow {
 		reasonRows = reasonRows[:min(len(reasonRows), limit)]
 	}
 	choiceCapacity := capacity - len(reasonRows)
-	start := max(p.selected-choiceCapacity+1, 0)
-	for i := start; i < min(start+choiceCapacity, len(p.menu.Choices)); i++ {
+	if (p.reviewedChoice != "" || p.inline && p.detail) && choiceCapacity > 1 {
+		choiceCapacity--
+	}
+	indices := m.commandChoiceIndices()
+	position := 0
+	for i, index := range indices {
+		if index == p.selected {
+			position = i
+		}
+	}
+	start := max(position-choiceCapacity+1, 0)
+	for _, i := range indices[start:min(start+max(choiceCapacity, 0), len(indices))] {
 		o := p.menu.Choices[i]
 		label := o.Label
 		if (p.menu.Picker || p.menu.Path == "theme") && o.Selected {
@@ -352,7 +426,7 @@ func (m Model) monitorCommandRows(width, height int) []commandDisplayRow {
 			if o.Selected {
 				mark = "[x] "
 			}
-			label = mark + label + " // " + o.Help
+			label = mark + label
 		} else if o.Next != "" && o.Unavailable == "" && p.menu.Path != "theme" {
 			label += " →"
 		} else if o.Unavailable != "" {
@@ -364,18 +438,24 @@ func (m Model) monitorCommandRows(width, height int) []commandDisplayRow {
 		} else if !o.Action && o.Next == "" {
 			label += " // HELP"
 		}
-		rows = append(rows, commandDisplayRow{text: ansi.Truncate(label, w, "…"), choice: i, action: "choose"})
+		rows = append(rows, commandDisplayRow{text: ansi.Truncate(label, w, "…"), help: o.Help, choice: i, action: "choose"})
 	}
 	if len(rows) == 0 && len(reasonRows) == 0 {
-		rows = append(rows, commandDisplayRow{text: "No available options. Use Codex for unsupported commands.", choice: -1})
+		text := "No available options. Use Codex for unsupported commands."
+		if p.inline && len(p.menu.Choices) > 0 {
+			text = "No matching slash commands."
+		}
+		rows = append(rows, commandDisplayRow{text: text, choice: -1})
 	}
 	for _, line := range reasonRows {
 		rows = append(rows, commandDisplayRow{text: line, choice: -1})
 	}
-	if p.menu.Picker {
-		if o, ok := m.commandChoice(); ok && p.reviewedChoice == o.ID {
+	if p.menu.Picker || p.inline && p.detail {
+		if o, ok := m.commandChoice(); ok && (p.reviewedChoice == o.ID || p.detail) {
 			message := "REVIEW // " + o.Label + " — no change sent."
-			if time.Now().After(p.until) {
+			if !o.Action {
+				message = strings.Join(strings.Fields(o.Help), " ")
+			} else if time.Now().After(p.until) {
 				message = "Review expired. Press Enter to review again."
 			}
 			if len(rows) < capacity {
@@ -384,17 +464,6 @@ func (m Model) monitorCommandRows(width, height int) []commandDisplayRow {
 		}
 	}
 
-	if (p.menu.Picker || p.menu.Path == "" || p.menu.Path == "help") && len(rows) < capacity {
-		if o, ok := m.commandChoice(); ok {
-			rows = append(rows, commandDisplayRow{choice: -1})
-			for _, line := range strings.Split(ansi.Hardwrap(o.Help, w, true), "\n") {
-				if len(rows) >= capacity {
-					break
-				}
-				rows = append(rows, commandDisplayRow{text: line, choice: -1})
-			}
-		}
-	}
 	if p.menu.Multiple {
 		preview := statusline.Text(statusLineSelection(p.menu), m.monitorStatusValues())
 		if preview == "" {
@@ -411,7 +480,11 @@ func (m Model) commandFooter(width int) []commandDisplayRow {
 	if p.menu.Input && !p.busy && p.notice == "" && strings.TrimSpace(p.input.Value()) != "" {
 		buttons = append(buttons, commandDisplayRow{text: i18n.Text("[ ENTER REVIEW ]"), action: "review"})
 	} else if p.menu.Multiple {
-		buttons = append(buttons, commandDisplayRow{text: i18n.Text("[ C APPLY ]"), action: "confirm"})
+		label := "[ C APPLY ]"
+		if p.inline {
+			label = "[ ENTER APPLY ]"
+		}
+		buttons = append(buttons, commandDisplayRow{text: i18n.Text(label), action: "confirm"})
 	} else if o, ok := m.commandChoice(); ok && o.Action && !p.busy && p.notice == "" {
 		if (p.detail || (p.menu.Picker && p.reviewedChoice == o.ID)) && time.Now().Before(p.until) {
 			buttons = append(buttons, commandDisplayRow{text: i18n.Text("[ C CONFIRM ]"), action: "confirm"})
@@ -434,7 +507,11 @@ func (m Model) commandFooter(width int) []commandDisplayRow {
 		buttons = append(buttons, commandDisplayRow{text: i18n.Text("[ ← BACK ]"), action: "back"})
 	}
 	if o, ok := m.commandChoice(); !p.busy && (p.notice != "" || (ok && o.Unavailable != "")) {
-		buttons = append(buttons, commandDisplayRow{text: i18n.Text("[ F REFRESH ]"), action: "refresh"})
+		label := i18n.Text("[ F REFRESH ]")
+		if p.inline {
+			label = strings.Replace(label, " F ", " CTRL+R ", 1)
+		}
+		buttons = append(buttons, commandDisplayRow{text: label, action: "refresh"})
 	}
 	buttons = append(buttons, commandDisplayRow{text: i18n.Text("[ ESC CANCEL ]"), action: "close"})
 	used := 0
@@ -447,12 +524,38 @@ func (m Model) commandFooter(width int) []commandDisplayRow {
 	return buttons
 }
 
+func (m Model) monitorCommandHint() string {
+	p := m.monitorCommands
+	switch {
+	case p.menu.Input:
+		return ""
+	case p.detail:
+		return "↑/↓ scroll"
+	case p.menu.Multiple:
+		return "↑/↓ select • Space toggle • ←/→ order"
+	default:
+		return "↑/↓ select"
+	}
+}
+
+func (m Model) monitorCommandTitle() string {
+	p := m.monitorCommands
+	if p.inline {
+		return ""
+	}
+	identity := shortSessionID(p.session)
+	if s, ok := m.contextDetailSession(); ok {
+		identity = monitorSessionIdentity(s)
+	}
+	return fmt.Sprintf("%s // %s", p.menu.Title, identity)
+}
+
 func (m Model) renderMonitorCommands(width, height int, colors palette) string {
 	p := m.monitorCommands
 	rows := m.monitorCommandRows(width, height)
 	body := make([]string, max(height-2, 1))
 	for i, r := range rows {
-		if i >= len(body)-2 {
+		if i >= m.commandContentRows(height) {
 			break
 		}
 		style := colors.label()
@@ -461,15 +564,24 @@ func (m Model) renderMonitorCommands(width, height int, colors palette) string {
 			style = colors.dimmed()
 			if r.choice == p.selected {
 				style = style.Foreground(colors.accent).Bold(true)
-				text = "> " + text
+				if !p.inline {
+					text = "> " + text
+				}
 			} else {
-				text = "  " + text
+				if !p.inline {
+					text = "  " + text
+				}
 				if r.choice == p.hover {
 					style = style.Underline(true)
 				}
 			}
 		}
-		body[i] = style.Render(ansi.Truncate(text, max(width-4, 1), ""))
+		text = ansi.Truncate(text, max(width-4, 1), "…")
+		body[i] = style.Render(text)
+		if r.help != "" {
+			help := ansi.Truncate(" // "+strings.Join(strings.Fields(r.help), " "), max(width-4-ansi.StringWidth(text), 0), "…")
+			body[i] += colors.dimmed().Render(help)
+		}
 	}
 	var footer []string
 	for _, b := range m.commandFooter(width) {
@@ -479,24 +591,16 @@ func (m Model) renderMonitorCommands(width, height int, colors palette) string {
 		}
 		footer = append(footer, style.Render(b.text))
 	}
-	if len(body) > 1 {
-		hint := "↑/↓ select"
-		if p.menu.Input {
-			hint = ""
-		} else if p.detail {
-			hint = "↑/↓ scroll"
-		} else if p.menu.Multiple {
-			hint = "↑/↓ select • Space toggle • ←/→ order"
+	if len(body) > 0 {
+		if height >= 6 && !p.inline {
+			body[len(body)-2] = colors.label().Render(ansi.Truncate(m.monitorCommandHint(), max(width-4, 1), ""))
 		}
-		body[len(body)-2] = colors.label().Render(ansi.Truncate(hint, max(width-4, 1), ""))
 		body[len(body)-1] = strings.Join(footer, "  ")
 	}
-	identity := shortSessionID(p.session)
-	if s, ok := m.contextDetailSession(); ok {
-		identity = monitorSessionIdentity(s)
+	for i := range body {
+		body[i] = " " + body[i] + " "
 	}
-	title := fmt.Sprintf("%s // %s", p.menu.Title, identity)
-	return frameSizedWithActions(width, max(height-2, 1), title, "", "", strings.Join(body, "\n"), colors.primary, colors)
+	return renderMonitorPopup(m.monitorCommandTitle(), strings.Join(body, "\n"), width, colors)
 }
 
 func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
@@ -514,6 +618,7 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 					p.menu = m.localCommandsMenu()
 					if p.restore != nil {
 						p.selected = min(p.restore.selected, len(p.menu.Choices)-1)
+						m.restoreCommandDraft()
 						p.restore = nil
 					}
 				} else {
@@ -553,6 +658,10 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 				p.restore = nil
 				if restore != nil {
 					p.selected = min(restore.selected, max(len(p.menu.Choices)-1, 0))
+					if p.inline {
+						m.monitorPrompt.input.SetValue(restore.draft)
+						m.monitorPrompt.input.CursorEnd()
+					}
 				}
 				if p.menu.Picker && restore == nil {
 					for i, o := range p.menu.Choices {
@@ -561,6 +670,9 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 							break
 						}
 					}
+				}
+				if p.inline && !p.menu.Input {
+					m.moveInlineCommandSelection(0)
 				}
 				if p.menu.Input {
 					p.input = textinput.New()
@@ -572,6 +684,14 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 					p.input.SetValue(p.menu.Value)
 					if restore != nil {
 						p.input.SetValue(restore.input)
+					} else if p.inline && m.commandQuery() != "" {
+						// Keep argument text entered while the catalogue loaded.
+						p.input.SetValue(m.commandQuery())
+					}
+					if p.inline {
+						m.monitorPrompt.input.SetValue(p.prefix + p.input.Value())
+						m.monitorPrompt.input.CursorEnd()
+						return m, nil, true
 					}
 					cmd := p.input.Focus()
 					return m, cmd, true
@@ -586,6 +706,16 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 	}
 	if !p.open {
 		if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "/" && m.meterView == viewMonitor && m.monitorContextDetail != "" && !m.monitorPrompt.input.Focused() && !m.scheduleUI.open && !m.monitorQueue.open {
+			focus := m.focusMonitorPrompt()
+			if m.monitorPrompt.input.Focused() {
+				if m.monitorPrompt.input.Value() == "" {
+					m.monitorPrompt.input.SetValue("/")
+				}
+				if codex.IsSessionCommand(m.monitorPrompt.input.Value()) {
+					return m, tea.Batch(focus, m.syncMonitorSuggestions()), true
+				}
+				// An unfocused ordinary draft must not be overwritten by '/'.
+			}
 			return m.openMonitorCommands("")
 		}
 		return m, nil, false
@@ -595,7 +725,15 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 
-	if p.menu.Input && !p.busy {
+	if p.inline {
+		if next, cmd, handled := m.updateInlineCommands(msg); handled {
+			return next, cmd, true
+		} else {
+			m = next
+			p = &m.monitorCommands
+		}
+	}
+	if p.menu.Input && !p.busy && !p.inline {
 		if key, ok := msg.(tea.KeyPressMsg); ok {
 			switch key.String() {
 			case "esc":
@@ -696,18 +834,30 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	if mouse, ok := msg.(tea.MouseMsg); ok {
-		g := m.monitorDashboardLayout()
+		popup := m.monitorCommandPopup()
 		v := mouse.Mouse()
-		x, y := v.X-4, v.Y-g.meterY-1
-		if x < 0 || x >= g.contentWidth-4 || y < 0 || y >= g.meterHeight-2 {
+		if popup.height == 0 || !popup.contains(v.X, v.Y) {
+			p.hover, p.footerHover = -1, ""
+			if _, click := msg.(tea.MouseClickMsg); click && v.Button == tea.MouseLeft {
+				area := m.monitorComposerPopupArea()
+				w, h := m.monitorPromptSize()
+				if p.inline && v.X >= area.x && v.X < area.x+area.width && v.Y >= area.y+area.height && v.Y < area.y+h && m.monitorPromptRows(w, h) > 0 {
+					return m, nil, false // Keep the expansion while editing its query.
+				}
+				m.closeMonitorCommands()
+				m.monitorSuggestions = monitorSuggestionState{request: m.monitorSuggestions.request + 1, dismissed: m.monitorPrompt.input.Value()}
+			}
 			return m, nil, false
 		}
+		x, y := v.X-popup.x-2, v.Y-popup.y-1
 		if v.Button == tea.MouseWheelUp || v.Button == tea.MouseWheelDown {
 			d := 3
 			if v.Button == tea.MouseWheelUp {
 				d = -3
 			}
-			if p.detail {
+			if p.inline {
+				m.moveInlineCommandSelection(d)
+			} else if p.detail {
 				p.scroll = max(0, p.scroll+d)
 			} else {
 				before := p.selected
@@ -718,11 +868,11 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 			}
 			return m, nil, true
 		}
-		rows := m.monitorCommandRows(g.contentWidth, g.meterHeight)
+		rows := m.monitorCommandRows(popup.width, popup.height)
 		p.hover = -1
 		p.footerHover = ""
 		_, click := msg.(tea.MouseClickMsg)
-		if y < len(rows) && rows[y].action == "choose" {
+		if x >= 0 && y >= 0 && y < min(len(rows), m.commandContentRows(popup.height)) && rows[y].action == "choose" {
 			p.hover = rows[y].choice
 			if click && v.Button == tea.MouseLeft {
 				if p.menu.Picker {
@@ -736,8 +886,8 @@ func (m Model) updateMonitorCommands(msg tea.Msg) (Model, tea.Cmd, bool) {
 				return m.chooseMonitorCommand()
 			}
 		}
-		if y == g.meterHeight-3 {
-			for _, b := range m.commandFooter(g.contentWidth) {
+		if y == popup.height-3 {
+			for _, b := range m.commandFooter(popup.width) {
 				w := ansi.StringWidth(b.text)
 				if x >= 0 && x < w {
 					p.footerHover = b.action
