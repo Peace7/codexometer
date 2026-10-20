@@ -1658,7 +1658,7 @@ it again. Enter still submits rather than inserting a newline. This is a text
 editor, with the catalogue-backed slash-command subset described below. Secret answers retain a single-line
 masked password field.
 
-**Slash commands:** local `/usage`, `/copy`, `/theme`, `/exit`/`quit` and
+**Slash commands:** local `/usage`, `/copy`, `/theme`, `/exit`/`/quit` and
 `/statusline` work without a shared Codex daemon. Read-only browser full detail
 offers these through **/ COMMANDS**. Live session-setting commands require the
 shared app-server and writable browser control. Type `/` in the ordinary composer
@@ -1701,6 +1701,23 @@ reviewing or changing the highlight sends no settings update. Buttons
 are clickable. Writable web mode exposes the same catalogue through
 **/ COMMANDS**, with the same composer suggestion shortcuts.
 
+**Local commands — no shared daemon required.** These are also available in
+read-only browser mode, except for the terminal-only `/commands` shortcut.
+
+| Command | Behaviour |
+| --- | --- |
+| `/usage` | Open Codexometer’s existing usage history. Quota/reset views retain their existing controls and confirmation. |
+| `/copy` | Reuse the selected session’s Copy action, copying the full observed reply/activity text. Ineligible or missing text gives feedback. |
+| `/theme` | Choose and save a Codexometer display theme; terminal picker or existing browser theme selector. |
+| `/exit`, `/quit` | Quit the Codexometer terminal interface; in the browser, leave session detail for Sessions. Codex sessions and the browser server continue running. |
+| `/statusline` | Choose and reorder detail-footer fields with a live preview. In the terminal, the same selection also prioritises the values in each session's left-hand telemetry box. |
+| `/commands` | Open the terminal command catalogue, including local commands. Typing `/` also opens suggestions. |
+
+**Connected-session commands — shared app-server required.** Availability depends
+on the installed server and session state; unsupported or empty catalogues are
+omitted. Changes require explicit confirmation and, in the browser, opt-in
+writable mode. Browse-only entries do not execute tools or change configuration.
+
 | Command family | Live options and behaviour |
 | --- | --- |
 | `/cd` | Change the selected session’s directory after review and confirmation while idle and with no queued messages. Absolute, session-relative and `~/` paths are supported; success is verified from running configuration. Retains thread ID/history; does not reproduce native project-config reload/fork. |
@@ -1712,11 +1729,6 @@ are clickable. Writable web mode exposes the same catalogue through
 | `/permissions` | Named profiles allowed for the session's directory, with supplied descriptions. Review carefully: this changes future permission behaviour. |
 | `/skills`, `/apps`, `/mcp`, `/hooks`, `/experimental` | **Browse-only** live inventories and supplied help, including MCP tool descriptions. Invoke/configure these through Codex. |
 | `/help` | Available command families. Unsupported or empty catalogues are omitted. |
-| `/usage` | **Local:** open Codexometer’s existing usage history. Quota/reset views retain their existing controls and confirmation. |
-| `/copy` | **Local:** reuse the selected session’s Copy action, copying the full observed reply/activity text. Ineligible or missing text gives feedback. |
-| `/theme` | **Local:** choose and save a Codexometer display theme; terminal picker or existing browser theme selector. |
-| `/exit`, `/quit` | **Local:** quit the Codexometer terminal interface; in the browser, leave session detail for Sessions. Codex sessions and the browser server continue running. |
-| `/statusline` | **Local Codexometer multi-select:** choose and reorder detail-footer fields with a live preview. In the terminal, the same selection also prioritises the values in each session's left-hand telemetry box. Works without the shared daemon. |
 
 The detail footer uses theme-highlighted text in the bottom border in terminal mode, and
 the last line of full session detail on web. Its default fields are observed
@@ -1753,8 +1765,9 @@ list, including local commands without a shared daemon.
 
 Codex does not expose a general slash-command discovery/execution API. These are
 explicit adapters to supported app-server catalogues, not a reproduction of
-every CLI command. Options and help are fetched on demand, not hard-coded or
-persisted; installed-server support determines what appears. Plugin lifecycle
+every CLI command. Live options and help are discovered from the server and
+cached in memory as described above, not hard-coded or persisted to disk;
+installed-server support determines what appears. Plugin lifecycle
 actions are excluded because installation, authentication and configuration
 review flows are not implemented. Experimental flags are browse-only because their mutation
 scope is process-wide rather than session-local. See the official
