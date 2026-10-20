@@ -4,6 +4,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -51,6 +52,131 @@ func TestSessionCommandsModelAndTier(t *testing.T) {
 	}
 	if _, err = p.SessionCommands(ctx, "closed", "model"); err == nil {
 		t.Fatal("opened unloaded session")
+	}
+}
+
+func TestCachedCommandClientRevalidatesWritesAndSettingsScope(t *testing.T) {
+	p, f := newQuotaDaemon(t)
+	ctx := context.Background()
+	if _, ok := p.Fetch(ctx, []string{"one"}); !ok {
+		t.Fatal("daemon unavailable")
+	}
+	c := Client{LiveUsage: &LiveUsageReader{statusProvider: p}}
+	menu, err := c.SessionCommands(ctx, "one", "model/small")
+	if err != nil || len(menu.Choices) != 1 || !menu.Choices[0].Action {
+		t.Fatal("missing model option", err)
+	}
+	if _, ok := c.CachedSessionCommands("one", "model/small"); !ok {
+		t.Fatal("menu did not enter the shared cache")
+	}
+	f.mu.Lock()
+	f.commandStatus = "active" // The cached menu still describes idle settings.
+	f.mu.Unlock()
+	if err := c.ExecuteSessionCommand(ctx, "one", menu.Path, menu.Revision, menu.Choices[0].ID); err == nil {
+		t.Fatal("write trusted cached settings after a turn started")
+	}
+	f.mu.Lock()
+	writes := len(f.writes)
+	f.commandStatus = "idle"
+	f.mu.Unlock()
+	if writes != 0 {
+		t.Fatal("stale cached command mutated the session")
+	}
+	if _, ok := c.CachedSessionCommands("one", "model/small"); ok {
+		t.Fatal("attempted write retained its old catalogue")
+	}
+	if _, err := c.SessionCommands(ctx, "one", "model/small"); err != nil {
+		t.Fatal(err)
+	}
+	settings := json.RawMessage(`{"threadId":"one","threadSettings":{"model":"large","effort":"high","serviceTier":null}}`)
+	p.handleNotification("thread/settings/updated", settings)
+	if _, ok := c.CachedSessionCommands("one", "model/small"); ok {
+		t.Fatal("settings change did not invalidate cached options immediately")
+	}
+	if _, err := c.SessionCommands(ctx, "one", "model/small"); err != nil {
+		t.Fatal(err)
+	}
+	p.handleNotification("thread/settings/updated", settings)
+	if _, ok := c.CachedSessionCommands("one", "model/small"); !ok {
+		t.Fatal("repeated unchanged settings notification invalidated the cache")
+	}
+}
+
+func TestCommandDiscoveryRetainsFetchedSubmenus(t *testing.T) {
+	p, fixture := newQuotaDaemon(t)
+	ctx := context.Background()
+	if _, ok := p.Fetch(ctx, []string{"one"}); !ok {
+		t.Fatal("daemon unavailable")
+	}
+	c := Client{LiveUsage: &LiveUsageReader{statusProvider: p}}
+	c.warmSessionCommands(LiveUsageSnapshot{CodexUp: true, Sessions: []LiveUsageSession{{ID: "one", Active: true}}})
+	if _, err := c.SessionCommands(ctx, "one", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"model", "rename", "cd"} {
+		menu, ok := c.CachedSessionCommands("one", path)
+		if !ok || menu.Path != path || menu.Revision == "" || path == "model" && len(menu.Choices) != 1 {
+			t.Fatalf("discovery discarded the fetched %s submenu", path)
+		}
+		if menu.Input {
+			encoded, err := json.Marshal(menu)
+			if err != nil || !strings.Contains(string(encoded), `"choices":[]`) {
+				t.Fatalf("cached %s input menu must serialize choices as an array: %s (%v)", path, encoded, err)
+			}
+		}
+	}
+	// Do not peek while working: the original idle scope must not revive after
+	// a full idle -> working -> idle cycle within the cache lifetime.
+	for _, status := range []string{"active", "idle"} {
+		fixture.mu.Lock()
+		fixture.commandStatus = status
+		fixture.mu.Unlock()
+		p.mu.Lock()
+		p.lastStatusAt = time.Time{}
+		p.mu.Unlock()
+		if _, ok := p.Fetch(ctx, []string{"one"}); !ok {
+			t.Fatal("status refresh failed")
+		}
+	}
+	if _, ok := c.CachedSessionCommands("one", ""); !ok {
+		t.Fatal("turn transition discarded stable root suggestions")
+	}
+	if _, ok := c.CachedSessionCommands("one", "model"); ok {
+		t.Fatal("complete turn cycle revived the pre-turn submenu")
+	}
+}
+
+type transitionMenuSource struct {
+	*menuCacheSource
+	provider *daemonStatusProvider
+}
+
+func (f *transitionMenuSource) sessionCommandScope(id, path string) string {
+	return f.provider.sessionCommandScope(id, path)
+}
+
+func TestCommandCacheRejectsReadSpanningTurnBetweenPolls(t *testing.T) {
+	p, _ := newQuotaDaemon(t)
+	if _, ok := p.Fetch(context.Background(), []string{"one"}); !ok {
+		t.Fatal("daemon unavailable")
+	}
+	f := &transitionMenuSource{menuCacheSource: &menuCacheSource{started: make(chan string, 1), release: make(chan struct{})}, provider: p}
+	c := newSessionCommandCache(f)
+	root := p.sessionCommandScope("one", "")
+	done := make(chan error, 1)
+	go func() { _, err := c.load(context.Background(), "one", "model", false); done <- err }()
+	<-f.started
+	p.handleNotification("turn/started", json.RawMessage(`{"threadId":"one","turn":{"id":"quick-turn"}}`))
+	p.handleNotification("turn/completed", json.RawMessage(`{"threadId":"one","turn":{"id":"quick-turn","status":"completed"}}`))
+	close(f.release)
+	if err := <-done; err != ErrSessionCommand {
+		t.Fatal("read spanning a complete turn was accepted", err)
+	}
+	if _, ok := c.peek("one", "model"); ok {
+		t.Fatal("read spanning a complete turn repopulated the cache")
+	}
+	if p.sessionCommandScope("one", "") != root {
+		t.Fatal("turn cycle invalidated stable root suggestions")
 	}
 }
 
