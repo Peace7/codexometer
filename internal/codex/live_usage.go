@@ -57,7 +57,10 @@ type LiveUsageSnapshot struct {
 // LiveUsageSession is one independently started local Codex session. Token
 // usage from explicitly linked spawned descendants is folded into the root.
 type LiveUsageSession struct {
-	ModelSettings    SessionModelSettings
+	ModelSettings SessionModelSettings
+	// Provider is empty for Codex sessions. Other agents' sessions are
+	// monitor-only: Codex session controls never target them.
+	Provider         string
 	ID               string
 	Name             string
 	WorkingDirectory string

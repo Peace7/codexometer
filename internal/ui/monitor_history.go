@@ -153,7 +153,7 @@ func (m *Model) moveMonitorHistory(delta int) {
 
 func (m *Model) pollMonitorHistory(now time.Time) tea.Cmd {
 	id := m.monitorContextDetail
-	if m.meterView != viewMonitor || id == "" || m.contextTargetHidden() || m.scheduleUI.open || m.monitorCommands.open || m.monitorQueue.open {
+	if m.meterView != viewMonitor || id == "" || m.contextTargetHidden() || m.scheduleUI.open || m.monitorCommands.open || m.monitorQueue.open || m.monitorTargetReadOnly() {
 		return nil
 	}
 	c, ok := m.fetcher.(codex.SessionHistoryClient)

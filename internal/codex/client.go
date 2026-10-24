@@ -32,30 +32,40 @@ type Client struct {
 	DigBenchToken string
 	// DigBenchGames is the launch-time GET /games result available to the TUI.
 	DigBenchGames []string
+	// ExtraUsage adds monitor-only sessions from other local agents.
+	ExtraUsage []UsageSource
 }
 
-// FetchTokenUsage reads live telemetry from locally observed Codex sessions.
+// FetchTokenUsage reads live telemetry from locally observed Codex sessions,
+// plus any monitor-only sessions from ExtraUsage sources.
 func (c Client) FetchTokenUsage(ctx context.Context) (LiveUsageSnapshot, error) {
-	if c.LiveUsage == nil {
-		return LiveUsageSnapshot{}, errors.New("local Codex session telemetry is not configured")
-	}
-	usage, err := c.LiveUsage.FetchTokenUsage(ctx)
-	if err == nil {
-		c.warmSessionCommands(usage)
-	}
-	return usage, err
+	return c.fetchLiveUsage(ctx, false)
 }
 
 // FetchTokenUsageFresh forces complete local rollout discovery.
 func (c Client) FetchTokenUsageFresh(ctx context.Context) (LiveUsageSnapshot, error) {
-	if c.LiveUsage == nil {
+	return c.fetchLiveUsage(ctx, true)
+}
+
+func (c Client) fetchLiveUsage(ctx context.Context, fresh bool) (LiveUsageSnapshot, error) {
+	if c.LiveUsage == nil && len(c.ExtraUsage) == 0 {
 		return LiveUsageSnapshot{}, errors.New("local Codex session telemetry is not configured")
 	}
-	usage, err := c.LiveUsage.FetchTokenUsageFresh(ctx)
-	if err == nil {
+	var usage LiveUsageSnapshot
+	if c.LiveUsage != nil {
+		var err error
+		if fresh {
+			usage, err = c.LiveUsage.FetchTokenUsageFresh(ctx)
+		} else {
+			usage, err = c.LiveUsage.FetchTokenUsage(ctx)
+		}
+		if err != nil {
+			return usage, err
+		}
+		// Warm commands before merging: only Codex sessions accept them.
 		c.warmSessionCommands(usage)
 	}
-	return usage, err
+	return mergeExtraUsage(ctx, usage, c.ExtraUsage), nil
 }
 
 type rpcError struct {

@@ -2617,8 +2617,28 @@ open directly.
 --quota-step-down PERCENT:MODEL:EFFORT[:SPEED[:ask|auto]] set a session profile at a quota threshold (repeatable; default ask)
 --reset-threshold PERCENT show available resets at this consumption level (0-100; default: 80)
 --reset-warning-hours HOURS expiry warning lead time (default: 72; 0 disables)
+--no-claude        do not monitor local Claude Code sessions
 -v, --version      print the version and exit
 ```
+
+### Claude Code sessions (monitor-only)
+
+When a Claude Code home exists (`CLAUDE_CONFIG_DIR`, or `~/.claude`), the
+Sessions view also lists local Claude Code sessions next to Codex sessions.
+They are read from the transcripts under `projects/` that were written in the
+last 24 hours or belong to a live session in the `sessions/` registry; nothing
+is sent to Claude and no Claude credentials are read.
+
+- Tokens per session count all input (uncached, cache writes and cache reads)
+  plus output, the same basis as Codex `total_tokens`. Content blocks of one
+  response are counted once. Subagent transcripts fold into their parent.
+- ACTIVE comes from a live registry entry (or a write in the last two
+  minutes); WORKING means the registry reports the session busy.
+- Last reply and last tool activity are shown as bounded excerpts; thinking
+  is never retained. Time to first token is not available for Claude.
+- Claude sessions are monitor-only: no prompts, approvals, queues, slash
+  commands or schedules, and no account-quota estimate (the quota windows are
+  Codex's). Codex quota estimates use Codex-only token shares.
 
 Examples:
 

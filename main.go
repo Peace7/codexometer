@@ -15,6 +15,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/merefield/codexometer/internal/claude"
 	"github.com/merefield/codexometer/internal/codex"
 	"github.com/merefield/codexometer/internal/digbench"
 	"github.com/merefield/codexometer/internal/ui"
@@ -395,6 +396,7 @@ func run(args []string, stdout, stderr io.Writer, deps dependencies) int {
 		resetThreshold    = flags.Int("reset-threshold", 80, "show reset at this quota consumption (0-100; also shown for expiring credits)")
 		resetWarningHours = flags.Int("reset-warning-hours", 72, "warn this many hours before a reset credit expires (0 disables expiry warnings)")
 		checkAuth         = flags.Bool("check-auth", false, "verify access to the current Codex login and exit")
+		noClaude          = flags.Bool("no-claude", false, "do not monitor local Claude Code sessions")
 		digBenchGame      = flags.String("digbench-game", "", "run one experimental DigBench game and exit")
 		digBenchModel     = flags.String("digbench-model", "gpt-5.6-sol", "Codex model for --digbench-game")
 		digBenchEffort    = flags.String("digbench-effort", "high", "reasoning effort for --digbench-game")
@@ -502,6 +504,7 @@ func run(args []string, stdout, stderr io.Writer, deps dependencies) int {
 		if liveUsage, err := codex.NewLiveUsageReader(""); err == nil {
 			client.LiveUsage = liveUsage
 		}
+		client.ExtraUsage = extraUsageSources(*noClaude)
 		var source web.Source = client
 		if *demo {
 			source = &demoFetcher{quotaSteps: quotaSteps}
@@ -528,6 +531,7 @@ func run(args []string, stdout, stderr io.Writer, deps dependencies) int {
 	if liveUsage, err := codex.NewLiveUsageReader(""); err == nil {
 		client.LiveUsage = liveUsage
 	}
+	client.ExtraUsage = extraUsageSources(*noClaude)
 	var fetcher ui.Fetcher = client
 	if *demo {
 		fetcher = &demoFetcher{quotaSteps: quotaSteps}
@@ -538,6 +542,19 @@ func run(args []string, stdout, stderr io.Writer, deps dependencies) int {
 		return 1
 	}
 	return 0
+}
+
+// extraUsageSources returns monitor-only session sources for other local
+// agents. A missing Claude Code installation simply adds nothing.
+func extraUsageSources(noClaude bool) []codex.UsageSource {
+	if noClaude {
+		return nil
+	}
+	reader, err := claude.NewReader("")
+	if err != nil {
+		return nil
+	}
+	return []codex.UsageSource{reader}
 }
 
 func formatDigBenchProgress(progress codex.DigBenchProgress) string {

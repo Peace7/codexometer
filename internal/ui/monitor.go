@@ -377,8 +377,11 @@ func (m Model) renderMonitorSessionMetrics(width, height int, session monitorSes
 		appendPriority(model)
 	}
 	priorityRows := len(lines)
-	if estimate := m.monitorSessionQuotaEstimate(share); estimate != "" {
-		appendLine(estimate)
+	// The account quota is Codex's; other agents' sessions get no estimate.
+	if session.provider == "" {
+		if estimate := m.monitorSessionQuotaEstimate(m.monitorCodexShare(total)); estimate != "" {
+			appendLine(estimate)
+		}
 	}
 	if session.name != "" && !selectedFields["current-dir"] {
 		appendLine(terminalLabel(session.workingDirectory))
@@ -587,6 +590,21 @@ func (m Model) monitorRecordedTokens() int64 {
 
 func (m Model) monitorSessionShare(tokens int64) float64 {
 	total := m.monitorRecordedTokens()
+	if total <= 0 || tokens <= 0 {
+		return 0
+	}
+	return min(float64(tokens)/float64(total), 1)
+}
+
+// monitorCodexShare is a Codex session's share of Codex-only recorded tokens,
+// so monitor-only sessions from other agents do not dilute quota estimates.
+func (m Model) monitorCodexShare(tokens int64) float64 {
+	total := m.monitorRecordedTokens()
+	for _, session := range m.monitorSessionData {
+		if session.provider != "" {
+			total -= max(session.latest-session.baseline, int64(0))
+		}
+	}
 	if total <= 0 || tokens <= 0 {
 		return 0
 	}

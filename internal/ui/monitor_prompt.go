@@ -80,7 +80,7 @@ func (m Model) monitorPromptOffer() codex.SessionPromptOffer {
 		return codex.SessionPromptOffer{}
 	}
 	c, ok := m.fetcher.(codex.SessionPromptClient)
-	if !ok {
+	if !ok || m.monitorTargetReadOnly() {
 		return codex.SessionPromptOffer{}
 	}
 	s, ok := m.contextDetailSession()

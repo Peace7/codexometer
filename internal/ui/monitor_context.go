@@ -187,6 +187,13 @@ func (m Model) contextDetailSession() (monitorSession, bool) {
 	return monitorSession{}, false
 }
 
+// monitorTargetReadOnly reports that the context target is another agent's
+// monitor-only session, which Codex session controls must never address.
+func (m Model) monitorTargetReadOnly() bool {
+	s, ok := m.contextDetailSession()
+	return ok && s.provider != ""
+}
+
 func (m Model) renderMonitorContextDetail(width, height int, colors palette) string {
 	if m.monitorQueue.open {
 		return m.renderQueueEditor()

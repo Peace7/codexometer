@@ -267,7 +267,9 @@ type monitorSessionDismissal struct {
 }
 
 type monitorSession struct {
-	name             string
+	name string
+	// provider is empty for Codex; other agents' sessions are monitor-only.
+	provider         string
 	averageRate      int64
 	modelSettings    codex.SessionModelSettings
 	preview          codex.SessionContext
@@ -2570,7 +2572,7 @@ func (m *Model) startMonitorSessions(usage codex.LiveUsageSnapshot, observedAt t
 	m.monitorDismissed = nil
 	for _, session := range usage.Sessions {
 		m.monitorSessionData = append(m.monitorSessionData, monitorSession{
-			id: session.ID, workingDirectory: session.WorkingDirectory,
+			id: session.ID, provider: session.Provider, workingDirectory: session.WorkingDirectory,
 			name: session.Name, modelSettings: session.ModelSettings,
 			baseline: session.TotalTokens, latest: session.TotalTokens, graphStart: session.TotalTokens,
 			startedAt:    observedAt,
@@ -2624,7 +2626,7 @@ func (m *Model) syncMonitorSessions(usage codex.LiveUsageSnapshot, observedAt ti
 				startedAt = sessionStart
 			}
 			created := monitorSession{
-				id: update.ID, workingDirectory: update.WorkingDirectory,
+				id: update.ID, provider: update.Provider, workingDirectory: update.WorkingDirectory,
 				name: update.Name, modelSettings: update.ModelSettings,
 				latest: update.TotalTokens, graphStart: 0, startedAt: startedAt,
 				lastActivity: update.LastActivity, agentCount: update.AgentCount,

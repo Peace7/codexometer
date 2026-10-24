@@ -134,7 +134,7 @@ func (m *Model) pollMonitorQueue() tea.Cmd {
 	q := &m.monitorQueue
 	c, ok := m.fetcher.(codex.SessionQueueClient)
 	id := m.monitorContextTarget()
-	if !ok || m.meterView != viewMonitor || id == "" || m.contextTargetHidden() || q.open || q.busy || q.loading || m.scheduleUI.open {
+	if !ok || m.meterView != viewMonitor || id == "" || m.contextTargetHidden() || q.open || q.busy || q.loading || m.scheduleUI.open || m.monitorTargetReadOnly() {
 		return nil
 	}
 	if m.monitorContextDetail == "" && (m.monitorSelectedID != id || m.rowContextMode(id) != contextWide) {
