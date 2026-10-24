@@ -194,6 +194,11 @@ func (m Model) monitorTargetReadOnly() bool {
 	return ok && s.provider != ""
 }
 
+func (m Model) monitorSessionReadOnly(id string) bool {
+	index := m.monitorSessionIndex(id)
+	return index >= 0 && m.monitorSessionData[index].provider != ""
+}
+
 func (m Model) renderMonitorContextDetail(width, height int, colors palette) string {
 	if m.monitorQueue.open {
 		return m.renderQueueEditor()

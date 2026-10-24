@@ -29,6 +29,7 @@ type session struct {
 	LatestGuidance  string               `json:"latestGuidance,omitempty"`
 	Streaming       bool                 `json:"streaming,omitempty"`
 	Name            string               `json:"name,omitempty"`
+	Provider        string               `json:"provider,omitempty"`
 	ID              string               `json:"id"`
 	Directory       string               `json:"directory"`
 	Tokens          int64                `json:"tokens"`
@@ -293,7 +294,8 @@ func (s *store) live(l codex.LiveUsageSnapshot, err error, now time.Time) {
 		tick := !now.Before(s.nextSample)
 		seen := map[string]bool{}
 		for _, row := range l.Sessions {
-			if s.state.Control {
+			// Only Codex sessions are controllable; other agents' are monitor-only.
+			if s.state.Control && row.Provider == "" {
 				s.contexts[row.ID] = row.Context
 				s.directories[row.ID] = row.WorkingDirectory
 			}
@@ -330,7 +332,7 @@ func (s *store) live(l codex.LiveUsageSnapshot, err error, now time.Time) {
 				text = row.Context.CommandDetails.Justification
 			}
 			s.state.Sessions = append(s.state.Sessions, session{
-				ID: row.ID, Name: codex.SanitizeSessionContext(row.Name), Directory: row.WorkingDirectory, Tokens: row.TotalTokens, Agents: row.AgentCount,
+				ID: row.ID, Provider: row.Provider, Name: codex.SanitizeSessionContext(row.Name), Directory: row.WorkingDirectory, Tokens: row.TotalTokens, Agents: row.AgentCount,
 				StatusLine: statusline.Values(statusline.Data{Model: row.ModelSettings.Model, Effort: row.ModelSettings.ReasoningEffort, Speed: row.ModelSettings.ServiceTier, Directory: row.WorkingDirectory, Name: row.Name, ID: row.ID, State: sessionStatus(row), Source: row.Context.Source, Tokens: row.TotalTokens, Agents: row.AgentCount}),
 				Status:     sessionStatus(row), ContextKind: contextKind(row.Context.Kind), Text: text,
 				Command: row.Context.CommandDetails.Command, Source: row.Context.Source, Activity: row.LastActivity,

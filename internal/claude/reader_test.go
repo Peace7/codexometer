@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,13 +19,13 @@ type testClock struct{ at time.Time }
 
 func (c *testClock) now() time.Time { return c.at }
 
-func assistantLine(t *testing.T, at time.Time, messageID string, input, cacheWrite, cacheRead, output int64, content ...map[string]any) string {
+func recordLine(t *testing.T, at time.Time, messageID, model string, input, cacheWrite, cacheRead, output int64, content ...map[string]any) string {
 	t.Helper()
 	record := map[string]any{
 		"type": "assistant", "timestamp": at.UTC().Format(time.RFC3339Nano), "sessionId": testSession,
 		"cwd": `F:\Work`, "effort": "high",
 		"message": map[string]any{
-			"id": messageID, "model": "claude-opus-5-5", "content": content,
+			"id": messageID, "model": model, "content": content,
 			"usage": map[string]int64{
 				"input_tokens": input, "cache_creation_input_tokens": cacheWrite,
 				"cache_read_input_tokens": cacheRead, "output_tokens": output,
@@ -36,6 +37,11 @@ func assistantLine(t *testing.T, at time.Time, messageID string, input, cacheWri
 		t.Fatal(err)
 	}
 	return string(data) + "\n"
+}
+
+func assistantLine(t *testing.T, at time.Time, messageID string, input, cacheWrite, cacheRead, output int64, content ...map[string]any) string {
+	t.Helper()
+	return recordLine(t, at, messageID, "claude-opus-5-5", input, cacheWrite, cacheRead, output, content...)
 }
 
 func appendFile(t *testing.T, path, text string) {
@@ -64,7 +70,7 @@ func newTestReader(t *testing.T, clock *testClock) (*Reader, string) {
 		t.Fatal(err)
 	}
 	r.now = clock.now
-	r.alive = func(int) bool { return true }
+	r.alive = func(int, string) bool { return true }
 	return r, filepath.Join(home, "projects", "F--Work")
 }
 
@@ -87,7 +93,7 @@ func TestContentBlocksOfOneMessageCountOnce(t *testing.T) {
 	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	r, project := newTestReader(t, clock)
 	path := filepath.Join(project, testSession+".jsonl")
-	at := clock.at.Add(-time.Minute)
+	at := clock.at
 	appendFile(t, path,
 		assistantLine(t, at, "msg_1", 2, 100, 1000, 50, map[string]any{"type": "thinking", "thinking": "secret"})+
 			assistantLine(t, at, "msg_1", 2, 100, 1000, 50, map[string]any{"type": "text", "text": "Done."})+
@@ -112,6 +118,17 @@ func TestContentBlocksOfOneMessageCountOnce(t *testing.T) {
 	}
 	if s.Context.Kind != codex.SessionContextActivity || s.Context.Text != "Bash: go test ./..." {
 		t.Fatalf("context = %v %q", s.Context.Kind, s.Context.Text)
+	}
+}
+
+func TestRecordsBeforeStartSupplyContextButNoUsage(t *testing.T) {
+	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	r, project := newTestReader(t, clock)
+	appendFile(t, filepath.Join(project, testSession+".jsonl"),
+		assistantLine(t, clock.at.Add(-time.Minute), "msg_old", 1000, 0, 0, 0, map[string]any{"type": "text", "text": "earlier"}))
+	s := fetch(t, r).Sessions[0]
+	if s.TotalTokens != 0 || len(s.ModelCalls) != 0 || s.Context.Text != "earlier" || s.ModelSettings.Model == "" {
+		t.Fatalf("session = tokens %d calls %d context %q model %q", s.TotalTokens, len(s.ModelCalls), s.Context.Text, s.ModelSettings.Model)
 	}
 }
 
@@ -157,16 +174,85 @@ func TestSubagentsFoldIntoParent(t *testing.T) {
 	}
 }
 
-func TestFilesAppearingLaterSkipCopiedHistory(t *testing.T) {
+func TestCopiedRecordsInAnotherFileCountOnce(t *testing.T) {
 	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	r, project := newTestReader(t, clock)
+	original := assistantLine(t, clock.at, "msg_1", 30, 0, 0, 0)
+	appendFile(t, filepath.Join(project, testSession+".jsonl"), original)
 	fetch(t, r)
-	clock.at = clock.at.Add(time.Minute)
+	clock.at = clock.at.Add(discoveryEvery)
+	// A resumed or forked session copies earlier records into a new file.
+	forked := filepath.Join(project, "99999999-2222-3333-4444-555555555555.jsonl")
+	appendFile(t, forked, original+assistantLine(t, clock.at, "msg_2", 5, 0, 0, 0))
+	usage := fetch(t, r)
+	if usage.TotalTokens != 35 {
+		t.Fatalf("total = %d, want 35", usage.TotalTokens)
+	}
+	calls := 0
+	for _, s := range usage.Sessions {
+		calls += len(s.ModelCalls)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestSyntheticMessagesCreateNoCalls(t *testing.T) {
+	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	r, project := newTestReader(t, clock)
 	appendFile(t, filepath.Join(project, testSession+".jsonl"),
-		assistantLine(t, clock.at.Add(-48*time.Hour), "msg_old", 1000, 0, 0, 0)+
-			assistantLine(t, clock.at, "msg_new", 30, 0, 0, 0))
-	if got := fetch(t, r).TotalTokens; got != 30 {
-		t.Fatalf("total = %d, want only post-start usage 30", got)
+		assistantLine(t, clock.at, "msg_1", 10, 0, 0, 40)+
+			recordLine(t, clock.at.Add(time.Second), "8c2e-uuid", "<synthetic>", 0, 0, 0, 0, map[string]any{"type": "text", "text": "API Error"}))
+	s := fetch(t, r).Sessions[0]
+	if len(s.ModelCalls) != 1 || s.ModelSettings.Model != "claude-opus-5-5" {
+		t.Fatalf("calls = %d model = %q", len(s.ModelCalls), s.ModelSettings.Model)
+	}
+}
+
+func TestCallHistoryIsBoundedWithoutPerCallCopies(t *testing.T) {
+	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	r, project := newTestReader(t, clock)
+	var lines strings.Builder
+	total := 2*historyMax + 10
+	for i := range total {
+		lines.WriteString(assistantLine(t, clock.at, fmt.Sprintf("msg_%d", i), 1, 0, 0, 1))
+	}
+	appendFile(t, filepath.Join(project, testSession+".jsonl"), lines.String())
+	usage := fetch(t, r)
+	s := usage.Sessions[0]
+	if len(s.ModelCalls) != historyMax || s.ModelCalls[historyMax-1].Sequence != uint64(total) {
+		t.Fatalf("calls = %d, last sequence %d", len(s.ModelCalls), s.ModelCalls[len(s.ModelCalls)-1].Sequence)
+	}
+	if retained := len(r.sessions[testSession].calls); retained >= 2*historyMax {
+		t.Fatalf("retained %d calls", retained)
+	}
+	if s.TotalTokens != int64(2*total) {
+		t.Fatalf("total = %d", s.TotalTokens)
+	}
+}
+
+func TestDeletedFilesStopBeingPolledButKeepTotals(t *testing.T) {
+	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	r, project := newTestReader(t, clock)
+	path := filepath.Join(project, testSession+".jsonl")
+	appendFile(t, path, assistantLine(t, clock.at, "msg_1", 9, 0, 0, 0))
+	fetch(t, r)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	clock.at = clock.at.Add(time.Second)
+	usage := fetch(t, r)
+	if len(r.files) != 0 || usage.TotalTokens != 9 {
+		t.Fatalf("files = %d total = %d", len(r.files), usage.TotalTokens)
+	}
+}
+
+func TestIdleSessionsWithoutUsageAreOmitted(t *testing.T) {
+	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	r, project := newTestReader(t, clock)
+	appendFile(t, filepath.Join(project, testSession+".jsonl"), assistantLine(t, clock.at.Add(-time.Hour), "msg_1", 1, 0, 0, 0))
+	if sessions := fetch(t, r).Sessions; len(sessions) != 0 {
+		t.Fatalf("sessions = %d, want 0", len(sessions))
 	}
 }
 
@@ -174,18 +260,29 @@ func TestRegistryDrivesNameAndWorking(t *testing.T) {
 	clock := &testClock{at: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	r, project := newTestReader(t, clock)
 	appendFile(t, filepath.Join(project, testSession+".jsonl"), assistantLine(t, clock.at.Add(-time.Hour), "msg_1", 1, 0, 0, 0))
-	registry := `{"pid":4242,"sessionId":"` + testSession + `","cwd":"F:\\Work","name":"defect backlog","status":"busy"}`
-	appendFile(t, filepath.Join(r.SessionsRoot, "4242.json"), registry)
+	registry := `{"pid":4242,"procStart":"777","sessionId":"` + testSession + `","cwd":"F:\\Work","name":"defect backlog","status":"busy"}`
+	registryPath := filepath.Join(r.SessionsRoot, "4242.json")
+	appendFile(t, registryPath, registry)
+	var gotStart string
+	r.alive = func(_ int, procStart string) bool { gotStart = procStart; return true }
 	s := fetch(t, r).Sessions[0]
-	if !s.Active || !s.Working || s.Name != "defect backlog" {
-		t.Fatalf("active/working/name = %v/%v/%q", s.Active, s.Working, s.Name)
+	if !s.Active || !s.Working || s.Name != "defect backlog" || gotStart != "777" {
+		t.Fatalf("active/working/name/procStart = %v/%v/%q/%q", s.Active, s.Working, s.Name, gotStart)
 	}
 
-	r.alive = func(int) bool { return false }
+	// A registry file caught mid-rewrite keeps its last good entry.
+	if err := os.WriteFile(registryPath, []byte(`{"pid":42`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	clock.at = clock.at.Add(discoveryEvery)
-	s = fetch(t, r).Sessions[0]
-	if s.Active || s.Working {
-		t.Fatalf("dead process still active/working: %v/%v", s.Active, s.Working)
+	if s := fetch(t, r).Sessions[0]; !s.Working {
+		t.Fatal("partial registry rewrite dropped the session")
+	}
+
+	r.alive = func(int, string) bool { return false }
+	clock.at = clock.at.Add(discoveryEvery)
+	if sessions := fetch(t, r).Sessions; len(sessions) != 0 {
+		t.Fatalf("dead idle session still listed: %+v", sessions)
 	}
 }
 
@@ -198,8 +295,18 @@ func TestOldUnregisteredFilesAreIgnored(t *testing.T) {
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
-	if usage := fetch(t, r); len(usage.Sessions) != 0 {
-		t.Fatalf("sessions = %d, want 0", len(usage.Sessions))
+	fetch(t, r)
+	if len(r.files) != 0 {
+		t.Fatalf("tracked files = %d, want 0", len(r.files))
+	}
+}
+
+func TestProcessAliveChecksStartTime(t *testing.T) {
+	if !processAlive(os.Getpid(), "") {
+		t.Fatal("current process reported dead")
+	}
+	if processAlive(-1, "") {
+		t.Fatal("invalid pid reported alive")
 	}
 }
 
@@ -225,15 +332,17 @@ func TestLiveClaudeHomeSmoke(t *testing.T) {
 	}
 	started := time.Now()
 	usage := fetch(t, r)
-	t.Logf("first fetch %s: files=%d sessions=%d active=%d total=%d", time.Since(started), len(r.files), len(usage.Sessions), usage.SessionCount, usage.TotalTokens)
+	t.Logf("first fetch %s: files=%d sessions=%d active=%d registry=%d", time.Since(started), len(r.files), len(usage.Sessions), usage.SessionCount, len(r.registry))
 	for _, s := range usage.Sessions {
-		if s.Active {
-			t.Logf("%s active=%v working=%v agents=%d tokens=%d calls=%d model=%s name=%q", s.ID, s.Active, s.Working, s.AgentCount, s.TotalTokens, len(s.ModelCalls), s.ModelSettings.Model, s.Name)
-		}
+		t.Logf("%s active=%v working=%v agents=%d model=%s name=%q", s.ID, s.Active, s.Working, s.AgentCount, s.ModelSettings.Model, s.Name)
 	}
+	time.Sleep(discoveryEvery)
 	started = time.Now()
 	again := fetch(t, r)
-	t.Logf("second fetch %s", time.Since(started))
+	t.Logf("fetch with discovery %s: total=%d", time.Since(started), again.TotalTokens)
+	started = time.Now()
+	fetch(t, r)
+	t.Logf("steady fetch %s", time.Since(started))
 	if again.TotalTokens < usage.TotalTokens {
 		t.Fatal("total moved backwards")
 	}

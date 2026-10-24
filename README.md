@@ -2629,11 +2629,15 @@ They are read from the transcripts under `projects/` that were written in the
 last 24 hours or belong to a live session in the `sessions/` registry; nothing
 is sent to Claude and no Claude credentials are read.
 
-- Tokens per session count all input (uncached, cache writes and cache reads)
-  plus output, the same basis as Codex `total_tokens`. Content blocks of one
-  response are counted once. Subagent transcripts fold into their parent.
-- ACTIVE comes from a live registry entry (or a write in the last two
-  minutes); WORKING means the registry reports the session busy.
+- Like Codex telemetry, tokens and calls are those recorded while
+  codexometer runs. They count all input (uncached, cache writes and cache
+  reads) plus output, the same basis as Codex `total_tokens`. Each response is
+  counted once by message id, including records that resumed or forked
+  transcripts copy. Subagent transcripts fold into their parent.
+- ACTIVE comes from a live registry entry whose process (and, on Windows, its
+  recorded start time) still matches, or a write in the last five minutes;
+  WORKING means the registry reports the session busy. Idle sessions with no
+  usage since start are not listed.
 - Last reply and last tool activity are shown as bounded excerpts; thinking
   is never retained. Time to first token is not available for Claude.
 - Claude sessions are monitor-only: no prompts, approvals, queues, slash

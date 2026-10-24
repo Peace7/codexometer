@@ -87,7 +87,8 @@ func (m *Model) loadMonitorCommands(path string, fresh ...bool) tea.Cmd {
 		return nil
 	}
 	c, ok := m.fetcher.(codex.SessionCommandsClient)
-	if !ok {
+	// Monitor-only sessions get the local menu, never Codex session commands.
+	if !ok || m.monitorSessionReadOnly(p.session) {
 		if path == "" || path == "help" {
 			p.menu = m.localCommandsMenu()
 			p.detail = false
@@ -102,6 +103,9 @@ func (m *Model) loadMonitorCommands(path string, fresh ...bool) tea.Cmd {
 			return nil
 		}
 		p.notice = "Shared app-server commands unavailable."
+		if ok {
+			p.notice = "Claude sessions are monitor-only."
+		}
 		return nil
 	}
 	p.input.Blur()
@@ -196,6 +200,10 @@ func (m Model) openMonitorCommands(path string) (Model, tea.Cmd, bool) {
 	}
 	if _, ok := m.fetcher.(codex.SessionCommandsClient); !ok && !codex.IsLocalSessionCommand(path) && path != "" && path != "help" {
 		m.monitorPrompt.notice = "Slash commands require the shared app-server."
+		return m, nil, true
+	}
+	if m.monitorTargetReadOnly() && !codex.IsLocalSessionCommand(path) && path != "" && path != "help" {
+		m.monitorPrompt.notice = "Claude sessions are monitor-only."
 		return m, nil, true
 	}
 	id := m.monitorContextTarget()

@@ -28,20 +28,23 @@ const (
 	idPrefix       = "claude:"
 	discoveryEvery = 5 * time.Second
 	activeHorizon  = 24 * time.Hour
-	// Without a live registry entry, recent writes are the only liveness signal.
-	activeQuietAfter = 2 * time.Minute
+	// Matches the Codex reader: recent writes keep an unregistered session active.
+	activeQuietAfter = 5 * time.Minute
 	historyMax       = 4_096
 	contextLimit     = 4_096
 	readBufferBytes  = 1 << 20
 )
 
 // Reader incrementally observes token usage written by local Claude Code
-// sessions. Message content is never retained beyond a bounded display excerpt.
+// sessions. Like the Codex reader it is a process-local accounting view: only
+// responses recorded after the reader started count as tokens or calls. Earlier
+// records still supply names, model, context and message-id deduplication.
+// Message content is never retained beyond a bounded display excerpt.
 type Reader struct {
 	ProjectsRoot string
 	SessionsRoot string
 	now          func() time.Time
-	alive        func(pid int) bool
+	alive        func(pid int, procStart string) bool
 
 	mu            sync.Mutex
 	initialized   bool
@@ -49,21 +52,24 @@ type Reader struct {
 	lastDiscovery time.Time
 	files         map[string]*cursor
 	sessions      map[string]*session
+	// registry is keyed by session id; registryFiles keeps the last good entry
+	// per registry file so a file caught mid-rewrite does not drop its session.
 	registry      map[string]registryEntry
-	sequence      uint64
+	registryFiles map[string]registryEntry
+	// Claude Code writes one record per content block, and resumed or forked
+	// transcripts copy earlier records, all repeating the same message id and
+	// usage. Tokens are counted once per message id across all files.
+	messages map[string]int64
+	sequence uint64
+	buffer   *bufio.Reader
 }
 
 type cursor struct {
-	sessionID string
-	subagent  bool
-	agent     string
-	offset    int64
-	// countFrom excludes records copied from history into files that appear
-	// after monitoring started (resumed sessions), so they are not new usage.
-	countFrom time.Time
-	// Claude Code writes one record per content block; blocks of one response
-	// repeat its usage, so tokens are counted once per message id.
-	messages map[string]int64
+	sessionID  string
+	subagent   bool
+	agent      string
+	offset     int64
+	lastGrowth time.Time
 }
 
 type session struct {
@@ -83,6 +89,7 @@ type session struct {
 
 type registryEntry struct {
 	PID       int    `json:"pid"`
+	ProcStart string `json:"procStart"`
 	SessionID string `json:"sessionId"`
 	Cwd       string `json:"cwd"`
 	Name      string `json:"name"`
@@ -92,7 +99,6 @@ type registryEntry struct {
 type record struct {
 	Type        string    `json:"type"`
 	Timestamp   time.Time `json:"timestamp"`
-	SessionID   string    `json:"sessionId"`
 	Cwd         string    `json:"cwd"`
 	Effort      string    `json:"effort"`
 	CustomTitle string    `json:"customTitle"`
@@ -153,10 +159,12 @@ func NewReader(claudeHome string) (*Reader, error) {
 		return nil, errors.New("Claude projects path is not a directory")
 	}
 	return &Reader{
-		ProjectsRoot: projects,
-		SessionsRoot: filepath.Join(claudeHome, "sessions"),
-		files:        make(map[string]*cursor),
-		sessions:     make(map[string]*session),
+		ProjectsRoot:  projects,
+		SessionsRoot:  filepath.Join(claudeHome, "sessions"),
+		files:         make(map[string]*cursor),
+		sessions:      make(map[string]*session),
+		registryFiles: make(map[string]registryEntry),
+		messages:      make(map[string]int64),
 	}, nil
 }
 
@@ -168,32 +176,33 @@ func (r *Reader) clock() time.Time {
 }
 
 // FetchTokenUsage implements codex.UsageSource. Totals never decrease: files
-// that fail to read are retried on the next call and keep their counted tokens.
+// that fail to read are retried on the next call and counted tokens are kept.
 func (r *Reader) FetchTokenUsage(ctx context.Context) (codex.LiveUsageSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.clock()
 	if !r.initialized {
 		r.startedAt = now
+		r.initialized = true
 	}
-	if !r.initialized || now.Sub(r.lastDiscovery) >= discoveryEvery {
+	if r.lastDiscovery.IsZero() || now.Sub(r.lastDiscovery) >= discoveryEvery {
 		r.readRegistry()
 		r.discover(now)
 		r.lastDiscovery = now
 	}
 	for path, c := range r.files {
-		if err := ctx.Err(); err != nil {
-			return r.snapshot(now), nil
+		if ctx.Err() != nil {
+			break
 		}
-		_ = r.consume(ctx, path, c)
+		r.consume(ctx, path, c, now)
 	}
-	r.initialized = true
 	return r.snapshot(now), nil
 }
 
-// discover tracks session transcripts at projects/<project>/<id>.jsonl and
-// subagent transcripts at projects/<project>/<id>/subagents/*.jsonl that were
-// written recently or belong to a live registered session.
+// discover tracks session transcripts at projects/<project>/<id>.jsonl that
+// were written recently or belong to a live registered session, and subagent
+// transcripts at projects/<project>/<id>/subagents/*.jsonl of those sessions
+// only, so idle history is never walked.
 func (r *Reader) discover(now time.Time) {
 	projects, err := os.ReadDir(r.ProjectsRoot)
 	if err != nil {
@@ -208,24 +217,27 @@ func (r *Reader) discover(now time.Time) {
 		if err != nil {
 			continue
 		}
+		var sessionDirs []string
 		for _, entry := range entries {
 			name := entry.Name()
-			if !entry.IsDir() && strings.HasSuffix(name, ".jsonl") {
-				id := strings.TrimSuffix(name, ".jsonl")
-				r.track(filepath.Join(projectDir, name), id, false, entry, now)
+			if entry.IsDir() {
+				sessionDirs = append(sessionDirs, name)
+			} else if strings.HasSuffix(name, ".jsonl") {
+				r.track(filepath.Join(projectDir, name), strings.TrimSuffix(name, ".jsonl"), false, entry, now)
+			}
+		}
+		for _, id := range sessionDirs {
+			if _, live := r.registry[id]; !live && r.files[filepath.Join(projectDir, id+".jsonl")] == nil {
 				continue
 			}
-			if !entry.IsDir() {
-				continue
-			}
-			subagentDir := filepath.Join(projectDir, name, "subagents")
+			subagentDir := filepath.Join(projectDir, id, "subagents")
 			subagents, err := os.ReadDir(subagentDir)
 			if err != nil {
 				continue
 			}
 			for _, sub := range subagents {
 				if !sub.IsDir() && strings.HasSuffix(sub.Name(), ".jsonl") {
-					r.track(filepath.Join(subagentDir, sub.Name()), name, true, sub, now)
+					r.track(filepath.Join(subagentDir, sub.Name()), id, true, sub, now)
 				}
 			}
 		}
@@ -236,82 +248,92 @@ func (r *Reader) track(path, sessionID string, subagent bool, entry os.DirEntry,
 	if _, known := r.files[path]; known {
 		return
 	}
-	_, live := r.registry[sessionID]
-	if !live {
+	if _, live := r.registry[sessionID]; !live {
 		info, err := entry.Info()
 		if err != nil || now.Sub(info.ModTime()) > activeHorizon {
 			return
 		}
 	}
-	c := &cursor{sessionID: sessionID, subagent: subagent, messages: make(map[string]int64)}
+	c := &cursor{sessionID: sessionID, subagent: subagent, lastGrowth: now}
 	if subagent {
 		c.agent = filepath.Base(path)
-	}
-	if r.initialized {
-		c.countFrom = r.startedAt
 	}
 	r.files[path] = c
 }
 
 func (r *Reader) readRegistry() {
-	r.registry = make(map[string]registryEntry)
-	entries, err := os.ReadDir(r.SessionsRoot)
-	if err != nil {
-		return
-	}
 	alive := r.alive
 	if alive == nil {
 		alive = processAlive
 	}
+	entries, _ := os.ReadDir(r.SessionsRoot)
+	files := make(map[string]registryEntry, len(entries))
+	r.registry = make(map[string]registryEntry, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(r.SessionsRoot, entry.Name()))
-		if err != nil {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
 			continue
 		}
 		var reg registryEntry
-		if json.Unmarshal(data, &reg) != nil || reg.SessionID == "" || reg.PID <= 0 || !alive(reg.PID) {
+		data, err := os.ReadFile(filepath.Join(r.SessionsRoot, name))
+		if err != nil || json.Unmarshal(data, &reg) != nil {
+			// Possibly caught mid-rewrite: keep the last good entry.
+			previous, ok := r.registryFiles[name]
+			if !ok {
+				continue
+			}
+			reg = previous
+		}
+		if reg.SessionID == "" || reg.PID <= 0 || !alive(reg.PID, reg.ProcStart) {
 			continue
 		}
+		files[name] = reg
 		r.registry[reg.SessionID] = reg
 	}
+	r.registryFiles = files
 }
 
 // consume reads complete lines appended since the cursor's offset. The size
 // comes from an open handle because Windows directory metadata can lag behind
 // a file another process still holds open.
-func (r *Reader) consume(ctx context.Context, path string, c *cursor) error {
+func (r *Reader) consume(ctx context.Context, path string, c *cursor, now time.Time) {
 	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		delete(r.files, path)
+		return
+	}
 	if err != nil {
-		return err
+		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return err
+		return
 	}
 	size := info.Size()
 	if size < c.offset {
-		// Rewritten in place: keep counted ids so nothing is double counted.
+		// Rewritten in place; message-id deduplication prevents recounting.
 		c.offset = 0
 	}
 	if size == c.offset {
-		return nil
+		if _, live := r.registry[c.sessionID]; !live && now.Sub(c.lastGrowth) > activeHorizon {
+			// Stop polling idle history; discovery re-tracks it if it is written again.
+			delete(r.files, path)
+		}
+		return
 	}
-	reader := bufio.NewReaderSize(io.NewSectionReader(f, c.offset, size-c.offset), readBufferBytes)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		line, err := reader.ReadBytes('\n')
-		if err == io.EOF {
-			// An incomplete final record is read again once it is finished.
-			return nil
-		}
+	c.lastGrowth = now
+	section := io.NewSectionReader(f, c.offset, size-c.offset)
+	if r.buffer == nil {
+		r.buffer = bufio.NewReaderSize(section, readBufferBytes)
+	} else {
+		r.buffer.Reset(section)
+	}
+	for ctx.Err() == nil {
+		line, err := r.buffer.ReadBytes('\n')
 		if err != nil {
-			return err
+			// io.EOF leaves an incomplete final record to be read once finished.
+			return
 		}
 		c.offset += int64(len(line))
 		r.observe(c, line)
@@ -360,8 +382,11 @@ func (r *Reader) observe(c *cursor, line []byte) {
 	if c.subagent {
 		s.agents[c.agent] = struct{}{}
 	}
-	if model := rec.Message.Model; model != "" && !strings.HasPrefix(model, "<") && !c.subagent {
-		s.model = model
+	// Synthetic messages (model "<synthetic>") are local bookkeeping such as
+	// API errors and interrupts, not model responses.
+	synthetic := strings.HasPrefix(rec.Message.Model, "<")
+	if rec.Message.Model != "" && !synthetic && !c.subagent {
+		s.model = rec.Message.Model
 		s.effort = rec.Effort
 	}
 	if rec.Timestamp.After(s.lastActivity) {
@@ -375,18 +400,18 @@ func (r *Reader) observe(c *cursor, line []byte) {
 	}
 	tokens := rec.Message.Usage.total()
 	id := rec.Message.ID
-	previous, seen := c.messages[id]
+	previous, seen := r.messages[id]
 	if id != "" {
 		if seen && tokens <= previous {
 			return
 		}
-		c.messages[id] = tokens
+		r.messages[id] = tokens
 	}
-	if !c.countFrom.IsZero() && rec.Timestamp.Before(c.countFrom) {
+	if rec.Timestamp.Before(r.startedAt) {
 		return
 	}
 	s.totalTokens += tokens - previous
-	if seen {
+	if seen || synthetic {
 		return
 	}
 	r.sequence++
@@ -401,7 +426,8 @@ func (r *Reader) observe(c *cursor, line []byte) {
 		Effort:          rec.Effort,
 		UsageSource:     Provider,
 	})
-	if len(s.calls) > historyMax {
+	// Trim in batches so a long session does not copy the history per call.
+	if len(s.calls) >= 2*historyMax {
 		s.calls = append([]codex.LiveModelCall(nil), s.calls[len(s.calls)-historyMax:]...)
 	}
 }
@@ -485,6 +511,8 @@ func (r *Reader) session(id string) *session {
 	return s
 }
 
+// snapshot reports sessions that are active or have usage since the reader
+// started, like the Codex reader; totals include every session ever counted.
 func (r *Reader) snapshot(now time.Time) codex.LiveUsageSnapshot {
 	ids := make([]string, 0, len(r.sessions))
 	for id := range r.sessions {
@@ -494,8 +522,12 @@ func (r *Reader) snapshot(now time.Time) codex.LiveUsageSnapshot {
 	var usage codex.LiveUsageSnapshot
 	for _, id := range ids {
 		s := r.sessions[id]
+		usage.TotalTokens += s.totalTokens
 		reg, live := r.registry[id]
 		active := live || (!s.lastActivity.IsZero() && now.Sub(s.lastActivity) <= activeQuietAfter)
+		if !active && s.totalTokens == 0 && len(s.calls) == 0 {
+			continue
+		}
 		name := s.title
 		if name == "" {
 			name = s.agentName
@@ -507,12 +539,15 @@ func (r *Reader) snapshot(now time.Time) codex.LiveUsageSnapshot {
 		if cwd == "" && live {
 			cwd = reg.Cwd
 		}
-		usage.TotalTokens += s.totalTokens
 		if s.lastActivity.After(usage.LastActivity) {
 			usage.LastActivity = s.lastActivity
 		}
 		if active {
 			usage.SessionCount++
+		}
+		calls := s.calls
+		if len(calls) > historyMax {
+			calls = calls[len(calls)-historyMax:]
 		}
 		usage.Sessions = append(usage.Sessions, codex.LiveUsageSession{
 			ModelSettings:    codex.SessionModelSettings{Model: s.model, ReasoningEffort: s.effort},
@@ -527,7 +562,7 @@ func (r *Reader) snapshot(now time.Time) codex.LiveUsageSnapshot {
 			Active:           active,
 			Working:          live && reg.Status == "busy",
 			Context:          s.context,
-			ModelCalls:       append([]codex.LiveModelCall(nil), s.calls...),
+			ModelCalls:       append([]codex.LiveModelCall(nil), calls...),
 		})
 	}
 	return usage
