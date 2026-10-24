@@ -176,6 +176,10 @@ func (m Model) renderMonitorSummary(width, height int, colors palette, navigatio
 	if m.monitorError == "" && m.quota.scanError != "" {
 		status = " // " + terminalLabel(m.quota.scanError)
 		stateColor = colors.warning
+	} else if m.monitorError == "" {
+		// TOKENS can reach billions, too wide for its header cell, so its
+		// provider split lives here: full digits, else compact, else omitted.
+		status += m.monitorTokenSplit(innerWidth - lipgloss.Width(state+status))
 	}
 	if len(lines) < height-2 {
 		lines = append(lines, ansi.Truncate(lipgloss.NewStyle().Bold(true).Foreground(stateColor).Render(state)+colors.dimmed().Render(status), innerWidth, ""))

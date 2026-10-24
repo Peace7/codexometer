@@ -2642,10 +2642,12 @@ is sent to Claude and no Claude credentials are read.
   is never retained. Time to first token is not available for Claude.
 - Claude rows and their detail view are drawn with double-line borders
   (`╔═╗`) instead of the rounded Codex ones, in every theme. While Claude
-  sessions are present, each Sessions header figure (TOKENS, SESSIONS,
-  ACTIVE, WORKING, APPROVAL, INPUT, CHECK*) adds a dimmed
-  `· CODEX n · CLAUDE n` breakdown, or `· CX n · CL n` when the column is
-  narrow, or nothing when even that does not fit.
+  sessions are present, each Sessions header count (SESSIONS, ACTIVE,
+  WORKING, APPROVAL, INPUT, CHECK*) adds a dimmed `· CODEX n · CLAUDE n`
+  breakdown, or `· CX n · CL n` when the column is narrow, or nothing when
+  even that does not fit. TOKENS, which can reach billions, is split on the
+  MONITORING line below (`CODEX 950,212 · CLAUDE 489,546`), switching to
+  compact figures such as `9B · 3.3B` when the line is short.
 - Claude sessions are monitor-only: no prompts, approvals, queues, slash
   commands or schedules, and no account-quota estimate (the quota windows are
   Codex's). Codex quota estimates use Codex-only token shares.

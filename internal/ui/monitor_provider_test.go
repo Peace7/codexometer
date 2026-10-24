@@ -105,11 +105,13 @@ func TestMonitorSummarySplitsEveryFigureByProvider(t *testing.T) {
 			{id: "claude:b", provider: "claude", displayed: true, active: true, lastActivity: time.Now(), latest: 500},
 		}}
 	text := ansi.Strip(strings.Join(m.monitorSummaryLines(240, 4, paletteFor(themeHacker)), "\n"))
-	tokens := formatTokens(3000) + " · CX " + formatTokens(1000) + " · CL " + formatTokens(2000)
-	for _, want := range []string{tokens, "3 · CODEX 1 · CLAUDE 2", "2 · CODEX 1 · CLAUDE 1", "0 · CODEX 0 · CLAUDE 0"} {
+	for _, want := range []string{"3 · CODEX 1 · CLAUDE 2", "2 · CODEX 1 · CLAUDE 1", "0 · CODEX 0 · CLAUDE 0"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("summary lacks %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "3,000 ·") {
+		t.Fatalf("TOKENS cell should not carry the split:\n%s", text)
 	}
 	narrow := ansi.Strip(strings.Join(m.monitorSummaryLines(150, 4, paletteFor(themeHacker)), "\n"))
 	if !strings.Contains(narrow, "3 · CX 1 · CL 2") {
@@ -123,6 +125,31 @@ func TestMonitorSummarySplitsEveryFigureByProvider(t *testing.T) {
 	m.monitorSessionData = m.monitorSessionData[:1]
 	if codexOnly := ansi.Strip(strings.Join(m.monitorSummaryLines(240, 4, paletteFor(themeHacker)), "\n")); strings.Contains(codexOnly, "CODEX") {
 		t.Fatalf("Codex-only summary should not split:\n%s", codexOnly)
+	}
+}
+
+func TestStatusLineSplitsTokensUpToBillions(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := Model{monitorState: monitorRunning, monitorStartedAt: now, monitorBaseline: 0, monitorLatest: 12_345_678_901,
+		monitorSessionData: []monitorSession{
+			{id: "codex", displayed: true, latest: 9_000_000_000},
+			{id: "claude:a", provider: "claude", displayed: true, latest: 3_345_678_901},
+		}}
+	render := func(width int) string {
+		return ansi.Strip(m.renderMonitorSummary(width, 6, paletteFor(themeHacker), false))
+	}
+	if wide := render(200); !strings.Contains(wide, "CODEX 9,000,000,000 · CLAUDE 3,345,678,901") || !strings.Contains(wide, "AVG TOK/MIN") {
+		t.Fatalf("wide status line lacks full split:\n%s", wide)
+	}
+	if medium := render(100); !strings.Contains(medium, "CODEX 9B · CLAUDE 3.3B") {
+		t.Fatalf("medium status line lacks compact split:\n%s", medium)
+	}
+	if narrow := render(60); strings.Contains(narrow, "CODEX") || !strings.Contains(narrow, "AVG TOK/MIN") {
+		t.Fatalf("narrow status line should drop the split, not the existing fields:\n%s", narrow)
+	}
+	m.monitorSessionData = m.monitorSessionData[:1]
+	if codexOnly := render(200); strings.Contains(codexOnly, "CLAUDE") {
+		t.Fatalf("Codex-only status line should not split:\n%s", codexOnly)
 	}
 }
 

@@ -22,14 +22,10 @@ func (m Model) monitorSummaryLines(width, rows int, colors palette) []string {
 	// otherCounts and otherTokens are the monitor-only (Claude) share of each
 	// figure; the Codex share is the remainder.
 	otherCounts := [monitorFilterCount]int{}
-	var otherTokens int64
 	split := false
 	for _, s := range m.monitorSessionData {
 		other := s.provider != ""
-		if other {
-			split = true
-			otherTokens += max(s.latest-s.baseline, int64(0))
-		}
+		split = split || other
 		if !m.monitorSessionVisible(s) {
 			continue
 		}
@@ -48,9 +44,8 @@ func (m Model) monitorSummaryLines(width, rows int, colors palette) []string {
 		}
 	}
 	labels := []string{"TOKENS", "SESSIONS", "ACTIVE", "WORKING", "APPROVAL", "INPUT", "CHECK"}
-	total := m.monitorRecordedTokens()
-	values := []string{formatTokens(total)}
-	splits := []monitorProviderSplit{{formatTokens(max(total-otherTokens, 0)), formatTokens(otherTokens)}}
+	values := []string{formatTokens(m.monitorRecordedTokens())}
+	splits := []monitorProviderSplit{{}}
 	for i, n := range counts {
 		value := strconv.Itoa(n)
 		if i > 0 && (m.monitorError != "" || m.monitorState != monitorRunning) {
@@ -82,7 +77,8 @@ func (m Model) monitorSummaryLines(width, rows int, colors palette) []string {
 			}
 			value := ansi.Truncate(values[i], cell, "")
 			suffix := ""
-			if split && values[i] != "—" {
+			// TOKENS is split on the status line, where billions still fit.
+			if split && i > 0 && values[i] != "—" {
 				suffix = splits[i].suffix(cell - lipgloss.Width(value))
 			}
 			if suffix == "" {
@@ -105,6 +101,30 @@ type monitorProviderSplit struct{ codex, claude string }
 func (p monitorProviderSplit) suffix(available int) string {
 	for _, format := range []string{" · CODEX %s · CLAUDE %s", " · CX %s · CL %s"} {
 		if text := fmt.Sprintf(format, p.codex, p.claude); lipgloss.Width(text) <= available {
+			return text
+		}
+	}
+	return ""
+}
+
+// monitorTokenSplit is the status-line breakdown of recorded tokens between
+// Codex and monitor-only Claude sessions, or "" without Claude sessions or room.
+func (m Model) monitorTokenSplit(available int) string {
+	var claude int64
+	present := false
+	for _, s := range m.monitorSessionData {
+		if s.provider != "" {
+			present = true
+			claude += max(s.latest-s.baseline, int64(0))
+		}
+	}
+	if !present {
+		return ""
+	}
+	codexTokens := max(m.monitorRecordedTokens()-claude, 0)
+	for _, format := range []func(int64) string{formatTokens, formatCompactTokens} {
+		text := "  //  " + fmt.Sprintf("CODEX %s · CLAUDE %s", format(codexTokens), format(claude))
+		if lipgloss.Width(text) <= available {
 			return text
 		}
 	}
