@@ -286,7 +286,7 @@ func frameSizedWithActions(width, height int, title, titleAction, footerAction, 
 	style := lipgloss.NewStyle().
 		Width(width).
 		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
+		Border(colors.frameBorder()).
 		BorderTop(false).
 		BorderForeground(color).
 		BorderBackground(colors.background).
@@ -313,7 +313,7 @@ func renderFrameTitle(width int, title string, color imagecolor.Color, colors pa
 
 func renderFrameTitleWithAction(width int, title, action string, color imagecolor.Color, colors palette) string {
 	width = max(width, 1)
-	border := lipgloss.RoundedBorder()
+	border := colors.frameBorder()
 	borderStyle := lipgloss.NewStyle().Foreground(color).Background(colors.background)
 	if width == 1 {
 		return borderStyle.Render(border.Top)
@@ -356,7 +356,7 @@ func renderFrameTitleWithAction(width int, title, action string, color imagecolo
 
 func renderFrameFooterWithAction(width int, action string, color imagecolor.Color, colors palette) string {
 	width = max(width, 1)
-	border := lipgloss.RoundedBorder()
+	border := colors.frameBorder()
 	borderStyle := lipgloss.NewStyle().Foreground(color).Background(colors.background)
 	if width == 1 {
 		return borderStyle.Render(border.Bottom)

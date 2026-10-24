@@ -95,6 +95,21 @@ type palette struct {
 	warningDim imagecolor.Color
 	danger     imagecolor.Color
 	background imagecolor.Color
+	// frame overrides the rounded panel border, e.g. for monitor-only
+	// sessions from other agents; a shape works in every theme.
+	frame lipgloss.Border
+}
+
+func (c palette) frameBorder() lipgloss.Border {
+	if c.frame.Top != "" {
+		return c.frame
+	}
+	return lipgloss.RoundedBorder()
+}
+
+// monitorOnlyFrame is the border of sessions Codex cannot control.
+func monitorOnlyFrame() lipgloss.Border {
+	return lipgloss.DoubleBorder()
 }
 
 func paletteFor(theme themeID) palette {

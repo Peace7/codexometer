@@ -2,9 +2,12 @@ package ui
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/merefield/codexometer/internal/codex"
 )
 
@@ -91,6 +94,61 @@ func TestProviderIsCarriedIntoMonitorSessions(t *testing.T) {
 			t.Fatalf("session %s provider = %q", s.id, s.provider)
 		}
 	}
+}
+
+func TestMonitorSummarySplitsEveryFigureByProvider(t *testing.T) {
+	now := time.Unix(1000, 0)
+	m := Model{monitorState: monitorRunning, monitorStartedAt: now, monitorBaseline: 0, monitorLatest: 3000,
+		monitorSessionData: []monitorSession{
+			{id: "codex", displayed: true, active: true, working: true, lastActivity: time.Now(), latest: 1000},
+			{id: "claude:a", provider: "claude", displayed: true, active: true, working: true, lastActivity: time.Now(), latest: 1500},
+			{id: "claude:b", provider: "claude", displayed: true, active: true, lastActivity: time.Now(), latest: 500},
+		}}
+	text := ansi.Strip(strings.Join(m.monitorSummaryLines(240, 4, paletteFor(themeHacker)), "\n"))
+	tokens := formatTokens(3000) + " · CX " + formatTokens(1000) + " · CL " + formatTokens(2000)
+	for _, want := range []string{tokens, "3 · CODEX 1 · CLAUDE 2", "2 · CODEX 1 · CLAUDE 1", "0 · CODEX 0 · CLAUDE 0"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("summary lacks %q:\n%s", want, text)
+		}
+	}
+	narrow := ansi.Strip(strings.Join(m.monitorSummaryLines(150, 4, paletteFor(themeHacker)), "\n"))
+	if !strings.Contains(narrow, "3 · CX 1 · CL 2") {
+		t.Fatalf("narrow summary lacks compact split:\n%s", narrow)
+	}
+	tiny := ansi.Strip(strings.Join(m.monitorSummaryLines(40, 8, paletteFor(themeHacker)), "\n"))
+	if strings.Contains(tiny, "CX") || strings.Contains(tiny, "CODEX") {
+		t.Fatalf("tiny summary should show totals only:\n%s", tiny)
+	}
+
+	m.monitorSessionData = m.monitorSessionData[:1]
+	if codexOnly := ansi.Strip(strings.Join(m.monitorSummaryLines(240, 4, paletteFor(themeHacker)), "\n")); strings.Contains(codexOnly, "CODEX") {
+		t.Fatalf("Codex-only summary should not split:\n%s", codexOnly)
+	}
+}
+
+func TestMonitorOnlyRowsUseDoubleBorders(t *testing.T) {
+	now := time.Now()
+	m := Model{width: 140, height: 30, meterView: viewMonitor, monitorState: monitorRunning, monitorStartedAt: now}
+	colors := paletteFor(themeHacker)
+	codexRow := ansi.Strip(m.renderMonitorSessionRow(140, 6, monitorSession{id: "codex-thread", displayed: true, active: true}, "", colors))
+	claudeRow := ansi.Strip(m.renderMonitorSessionRow(140, 6, monitorSession{id: "claude:a", provider: "claude", displayed: true, active: true}, "", colors))
+	if !strings.Contains(codexRow, "╭") || strings.Contains(codexRow, "═") {
+		t.Fatalf("Codex row should keep rounded borders:\n%s", codexRow)
+	}
+	if strings.Contains(claudeRow, "╭") || strings.Count(claudeRow, "╔") < 3 || strings.Count(claudeRow, "╚") < 3 {
+		t.Fatalf("Claude row should use double borders on all three boxes:\n%s", claudeRow)
+	}
+	if lineWidths(codexRow) != lineWidths(claudeRow) {
+		t.Fatal("border style must not change row geometry")
+	}
+}
+
+func lineWidths(row string) string {
+	var widths []string
+	for _, line := range strings.Split(row, "\n") {
+		widths = append(widths, strconv.Itoa(ansi.StringWidth(line)))
+	}
+	return strings.Join(widths, ",")
 }
 
 func TestCodexShareExcludesMonitorOnlySessions(t *testing.T) {

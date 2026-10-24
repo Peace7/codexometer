@@ -291,6 +291,9 @@ func (m Model) renderMonitorSessionRow(width, height int, session monitorSession
 	if session.id == m.monitorSelectedID || session.id == m.monitorContextExpanded {
 		rowColors.primary = colors.accent
 	}
+	if session.provider != "" {
+		rowColors.frame = monitorOnlyFrame()
+	}
 	metricsWidth, _, ok := monitorSessionColumnWidths(width)
 	if !ok {
 		return m.renderMonitorGraphSamples(width, height, session.samples, i18n.Text("TOKENS"), rowColors)

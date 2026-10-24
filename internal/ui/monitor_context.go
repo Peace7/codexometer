@@ -210,6 +210,9 @@ func (m Model) renderMonitorContextDetail(width, height int, colors palette) str
 		}
 		return panel
 	}
+	if m.monitorTargetReadOnly() {
+		colors.frame = monitorOnlyFrame()
+	}
 	document := m.contextDetailDocument(max(width-4, 1))
 	lines := make([]string, len(document))
 	for i, line := range document {

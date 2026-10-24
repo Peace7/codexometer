@@ -19,26 +19,45 @@ import (
 // again: linked agents are already included in their parent session.
 func (m Model) monitorSummaryLines(width, rows int, colors palette) []string {
 	counts := [monitorFilterCount]int{}
+	// otherCounts and otherTokens are the monitor-only (Claude) share of each
+	// figure; the Codex share is the remainder.
+	otherCounts := [monitorFilterCount]int{}
+	var otherTokens int64
+	split := false
 	for _, s := range m.monitorSessionData {
+		other := s.provider != ""
+		if other {
+			split = true
+			otherTokens += max(s.latest-s.baseline, int64(0))
+		}
 		if !m.monitorSessionVisible(s) {
 			continue
 		}
-		counts[0]++
+		indexes := []monitorStatusFilter{monitorFilterAll}
 		if monitorSessionRecentlyActive(s) {
-			counts[monitorFilterActive]++
+			indexes = append(indexes, monitorFilterActive)
 		}
 		if status := monitorSessionStatus(s); status != monitorFilterAll {
-			counts[status]++
+			indexes = append(indexes, status)
+		}
+		for _, index := range indexes {
+			counts[index]++
+			if other {
+				otherCounts[index]++
+			}
 		}
 	}
 	labels := []string{"TOKENS", "SESSIONS", "ACTIVE", "WORKING", "APPROVAL", "INPUT", "CHECK"}
-	values := []string{formatTokens(m.monitorRecordedTokens())}
+	total := m.monitorRecordedTokens()
+	values := []string{formatTokens(total)}
+	splits := []monitorProviderSplit{{formatTokens(max(total-otherTokens, 0)), formatTokens(otherTokens)}}
 	for i, n := range counts {
 		value := strconv.Itoa(n)
 		if i > 0 && (m.monitorError != "" || m.monitorState != monitorRunning) {
 			value = "—"
 		}
 		values = append(values, value)
+		splits = append(splits, monitorProviderSplit{strconv.Itoa(n - otherCounts[i]), strconv.Itoa(otherCounts[i])})
 	}
 	columns, cell := monitorSummaryColumns(width, rows)
 	var lines []string
@@ -62,11 +81,34 @@ func (m Model) monitorSummaryLines(width, rows int, colors palette) []string {
 				}
 			}
 			value := ansi.Truncate(values[i], cell, "")
-			numbers = append(numbers, style.Render(value+strings.Repeat(" ", max(cell-lipgloss.Width(value), 0))))
+			suffix := ""
+			if split && values[i] != "—" {
+				suffix = splits[i].suffix(cell - lipgloss.Width(value))
+			}
+			if suffix == "" {
+				numbers = append(numbers, style.Render(value+strings.Repeat(" ", max(cell-lipgloss.Width(value), 0))))
+				continue
+			}
+			numbers = append(numbers, style.Render(value)+colors.dimmed().Render(suffix+strings.Repeat(" ", max(cell-lipgloss.Width(value)-lipgloss.Width(suffix), 0))))
 		}
 		lines = append(lines, strings.Join(titles, " "), strings.Join(numbers, " "))
 	}
 	return lines
+}
+
+// monitorProviderSplit is one header figure divided between Codex and the
+// monitor-only Claude sessions.
+type monitorProviderSplit struct{ codex, claude string }
+
+// suffix returns the widest provider breakdown that fits after the total, or
+// nothing when even the compact form does not fit.
+func (p monitorProviderSplit) suffix(available int) string {
+	for _, format := range []string{" · CODEX %s · CLAUDE %s", " · CX %s · CL %s"} {
+		if text := fmt.Sprintf(format, p.codex, p.claude); lipgloss.Width(text) <= available {
+			return text
+		}
+	}
+	return ""
 }
 
 type monitorAttentionItem struct {
